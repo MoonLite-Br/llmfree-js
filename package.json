@@ -1,0 +1,53 @@
+{
+  "name": "llmf",
+  "version": "0.6.3",
+  "description": "llmf (llmfree): one dead-simple call for free, keyless LLM endpoints, with automatic fallback.",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./index.d.ts",
+  "bin": {
+    "llmf-js": "./bin/llmf-js.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md",
+    "bin",
+    "index.d.ts",
+    "src"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --input-type=module -e \"import {version} from './src/version.js'; console.log('llmf', version)\""
+  },
+  "keywords": [
+    "llm",
+    "ai",
+    "chat",
+    "free",
+    "keyless",
+    "openai-compatible",
+    "fallback",
+    "termux"
+  ],
+  "author": "Html",
+  "license": "MIT",
+  "homepage": "https://github.com/MoonLite-Br/llmfree-js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MoonLite-Br/llmfree-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MoonLite-Br/llmfree-js/issues"
+  },
+  "dependencies": {}
+}
