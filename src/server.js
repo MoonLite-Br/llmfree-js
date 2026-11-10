@@ -1,26 +1,43 @@
-// ``llmf serve``: local OpenAI-compatible server (node:http only).
+// ``llmf serve``: OpenAI-compatible server (node:http only, no dependencies).
 //
-// Point any OpenAI client at ``http://127.0.0.1:8000/v1`` and it uses the free endpoints, with fallback.
-// Local by default: 127.0.0.1, no CORS, optional bearer key.
+// Local by default (127.0.0.1, no auth, no limits). ``public: true`` (``--public``, ``--cloudflare``) switches on the
+// hardening profile: mandatory API key, per-key / per-IP rate limits, ban after repeated auth failures, body and
+// ``max_tokens`` caps, security headers, generic error messages and the anti-bot check for web pages.
+// Optional web features: ``ui`` (built-in chat page), ``web`` (one HTML file or a static directory) and ``appPort``
+// (reverse proxy to your own web app, see ``serve({ app: "node main.js" })``).
+import fs from "node:fs";
 import http from "node:http";
-import { timingSafeEqual } from "node:crypto";
+import https from "node:https";
+import { timingSafeEqual as sec_timingSafeEqual } from "node:crypto";
 import { AllProvidersFailed, LLMFError, ModelNotFound } from "./errors.js";
+import * as sec from "./security.js";
 import { ChatCompletion, ChatCompletionChunk } from "./types.js";
 import { randomHex } from "./util.js";
+import { AppProcess, StaticSite, asset, contentType, proxyRequest } from "./web.js";
+import { Tunnel, TunnelError } from "./tunnel.js";
 
+const MAX_BODY = 20 * 1024 * 1024; // base64 images can be large
+const APP_MAX_BODY = 25 * 1024 * 1024;
+const ALIASES = ["auto", "fast", "best", "code", "vision", "reasoning"];
+const PARAMS = ["max_tokens", "max_completion_tokens", "temperature", "top_p", "stop", "tools", "response_format"];
 const LOOPBACK = /^(localhost|127(\.\d+){3}|::1)$/i;
 const hostOf = (h) => { try { return new URL("http://" + h).hostname.replace(/^\[|\]$/g, ""); } catch { return null; } };
 
-const MAX_BODY = 20 * 1024 * 1024; // base64 images can be large
-const ALIASES = ["auto", "fast", "best", "code", "vision", "reasoning"];
-const PARAMS = ["max_tokens", "max_completion_tokens", "temperature", "top_p", "stop", "tools", "response_format"];
+export class ConfigError extends TypeError {}
+
+const DEFAULTS = {
+  apiKey: null, cors: false, corsOrigins: [], strictModels: false, fallback: true,
+  maxConcurrent: null, rate: null, ipRate: null, sessionRate: 12, allowIp: [], denyIp: [],
+  trustProxy: false, maxBody: null, maxTokensCap: null, sessionMaxTokens: 1024, logFile: null,
+  banAfter: null, antibot: null, powBits: 16, turnstileSecret: null, turnstileSitekey: null,
+  ui: false, web: null, appPort: null, csp: null, tlsCert: null, tlsKey: null, public: false,
+  socketTimeout: null, maxConnections: null, secret: null, fetch: null, sessionTtl: 1800, bindHost: null,
+};
+const LOCAL = { maxConcurrent: 48, rate: 0, ipRate: 0, maxBody: MAX_BODY, maxTokensCap: 0, banAfter: 0, socketTimeout: 60 };
+const PUBLIC = { maxConcurrent: 32, rate: 120, ipRate: 240, maxBody: 1024 * 1024, maxTokensCap: 4096, banAfter: 10, socketTimeout: 30 };
 
 const err = (message, type, code = null) => ({ error: { message, type, code } });
-
-function safeEqual(a, b) {
-  const x = Buffer.from(a), y = Buffer.from(b);
-  return x.length === y.length && timingSafeEqual(x, y);
-}
+const flag = (k) => "--" + k.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
 
 /** Map OpenAI request fields onto llmf call options. */
 function callOptions(body) {
@@ -35,138 +52,459 @@ function callOptions(body) {
   return o;
 }
 
-export function createServer(client, { apiKey = null, cors = false, strictModels = false, fallback = true, maxConcurrent = 48, corsOrigins = [], bindHost = null } = {}) {
-  if (!Number.isInteger(maxConcurrent) || maxConcurrent < 0) throw new TypeError("maxConcurrent must be an integer >= 0 (0 = unlimited)");
+function resolveConfig(client, opts) {
+  const unknown = Object.keys(opts).filter((k) => !(k in DEFAULTS));
+  if (unknown.length) throw new ConfigError(`unknown server option(s): ${unknown.sort().join(", ")}`);
+  const o = { ...DEFAULTS };
+  for (const [k, v] of Object.entries(opts)) if (v !== undefined) o[k] = v;
+  for (const [k, v] of Object.entries(o.public ? PUBLIC : LOCAL)) if (o[k] === null) o[k] = v;
+  if (o.tlsKey && !o.tlsCert) throw new ConfigError("--tls-key needs --tls-cert");
+  const bad = (k, why) => { throw new ConfigError(`${flag(k)} must be ${why}`); };
+  if (!Number.isInteger(o.powBits) || o.powBits < 8 || o.powBits > 28) throw new ConfigError("--pow-bits must be between 8 and 28 (higher is too slow for phones)");
+  if (!Number.isInteger(o.maxConcurrent) || o.maxConcurrent < 0) bad("maxConcurrent", "an integer >= 0 (0 = unlimited)");
+  for (const k of ["maxBody", "socketTimeout"]) if (!(Number(o[k]) >= 0)) bad(k, "not negative");
+  if (Number(o.maxBody) === 0) throw new ConfigError("--max-body must be at least 1");
+  for (const k of ["rate", "ipRate", "sessionRate", "maxTokensCap", "sessionMaxTokens", "maxConnections"]) if (o[k] !== null && !(Number(o[k]) >= 0)) bad(k, "not negative");
+  if (o.appPort !== null && !(Number.isInteger(o.appPort) && o.appPort >= 0 && o.appPort <= 65535)) throw new ConfigError("--app-port must be between 0 and 65535");
+
+  const cfg = { client, public: !!o.public, generatedKey: null, apiKeys: [], loopbackOnly: false, hosts: new Set(), ...o };
+  cfg.apiKeys = (typeof o.apiKey === "string" ? [o.apiKey] : [...(o.apiKey || [])]).filter(Boolean);
+  if (cfg.public && !cfg.apiKeys.length) { cfg.generatedKey = sec.newApiKey(); cfg.apiKeys.push(cfg.generatedKey); }
+  cfg.kid = new Map(cfg.apiKeys.map((k) => [k, sec.keyId(k)]));
+  cfg.requireAuth = cfg.apiKeys.length > 0 || cfg.public;
+  cfg.cors = !!o.cors;
+  cfg.corsOrigins = (o.corsOrigins || []).map((x) => String(x).replace(/\/+$/, ""));
+  try { cfg.allow = sec.parseNetworks(o.allowIp); cfg.deny = sec.parseNetworks(o.denyIp); } catch (e) { throw new ConfigError(e.message); }
+  cfg.ipLimiter = new sec.RateLimiter(Number(o.ipRate), Math.max(10, Number(o.ipRate) / 4));
+  cfg.keyLimiter = new sec.RateLimiter(Number(o.rate), Math.max(5, Number(o.rate) / 4));
+  cfg.sessionLimiter = new sec.RateLimiter(Number(o.sessionRate), Math.max(3, Number(o.sessionRate) / 3));
+  cfg.challengeLimiter = new sec.RateLimiter(cfg.public ? 30 : 0, 10);
+  cfg.bans = new sec.BanList(Number(o.banAfter));
+  cfg.static = o.web ? new StaticSite(o.web) : null;
+  cfg.tls = !!o.tlsCert;
+  cfg.sessions = !!(cfg.ui || cfg.static || cfg.appPort !== null || o.antibot);
+  cfg.antibot = null;
+  if (cfg.sessions) {
+    try {
+      cfg.antibot = new sec.Antibot(o.antibot || (cfg.public ? "pow" : "off"), { bits: o.powBits, sessionTtl: o.sessionTtl, secret: o.secret, turnstileSecret: o.turnstileSecret, turnstileSitekey: o.turnstileSitekey, fetch: o.fetch });
+    } catch (e) { throw new ConfigError(e.message); }
+  }
+  cfg.logFd = null;
+  if (o.logFile) {
+    if (o.logFile === "-") cfg.logFd = 2;
+    else { try { cfg.logFd = fs.openSync(o.logFile, "a"); } catch (e) { throw new ConfigError(`cannot open the log file ${o.logFile}: ${e.message}`); } }
+  }
+  cfg.log = (entry) => {
+    if (cfg.logFd === null) return;
+    try { fs.writeSync(cfg.logFd, JSON.stringify({ ...entry, t: new Date().toISOString() }) + "\n"); } catch { /* logging is best effort */ }
+  };
+  cfg.close = () => { if (cfg.logFd !== null && cfg.logFd > 2) { try { fs.closeSync(cfg.logFd); } catch { /* gone */ } cfg.logFd = null; } };
+  return cfg;
+}
+
+export function createServer(client, opts = {}) {
+  const cfg = resolveConfig(client, opts);
+  const bindHost = cfg.bindHost;
+  cfg.loopbackOnly = !cfg.public && !cfg.trustProxy && !!bindHost && LOOPBACK.test(bindHost);
+  cfg.hosts = new Set(["localhost", "127.0.0.1", "::1", String(bindHost || "").toLowerCase()]);
   let active = 0; // chat requests being served right now
-  const keys = typeof apiKey === "string" ? [apiKey] : (apiKey || []).filter(Boolean);
 
   const send = (res, code, obj, extra = {}) => {
     const data = Buffer.from(JSON.stringify(obj));
     res.writeHead(code, { "Content-Type": "application/json", "Content-Length": data.length, "Cache-Control": "no-store", ...extra });
-    res.end(data);
+    res.end(res.req?.method === "HEAD" ? undefined : data);
+  };
+  const limited = (res, wait, message, code = "rate_limited") => send(res, 429, err(message, "rate_limit_error", code), { "Retry-After": String(Math.max(1, Math.ceil(wait))) });
+  const bytes = (res, data, ctype, extra = {}) => {
+    res.writeHead(200, { "Content-Type": ctype, "Content-Length": data.length, "Cache-Control": "no-cache", ...extra });
+    res.end(res.req?.method === "HEAD" ? undefined : data);
   };
 
-  const readJson = (req, res) => new Promise((resolve) => {
-    const n = Number(req.headers["content-length"]);
-    if (!Number.isFinite(n) || n < 0) { send(res, 411, err("Content-Length required", "invalid_request_error")); return resolve(null); }
-    if (n > MAX_BODY) { send(res, 413, err("request too large", "invalid_request_error")); return resolve(null); }
-    const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => {
-      try {
-        const body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
-        if (body === null || typeof body !== "object" || Array.isArray(body)) throw new TypeError("JSON object expected");
-        resolve(body);
-      } catch (e) { send(res, 400, err(`bad request: ${e.message}`, "invalid_request_error")); resolve(null); }
+  function applyHeaders(req, res, proxied = false) {
+    const origin = String(req.headers.origin || "").replace(/\/+$/, "");
+    if (cfg.cors) res.setHeader("Access-Control-Allow-Origin", "*");
+    else if (origin && cfg.corsOrigins.includes(origin)) { res.setHeader("Access-Control-Allow-Origin", origin); res.setHeader("Vary", "Origin"); }
+    if (res.hasHeader("Access-Control-Allow-Origin")) {
+      res.setHeader("Access-Control-Allow-Headers", "authorization, content-type");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    }
+    if (!proxied) {
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      res.setHeader("X-Frame-Options", "SAMEORIGIN");
+      res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+      if (cfg.tls) res.setHeader("Strict-Transport-Security", "max-age=31536000");
+    }
+    if (cfg.csp) res.setHeader("Content-Security-Policy", cfg.csp);
+  }
+
+  // ------------------------------------------------------------ identity
+  const peerIp = (req) => sec.normIp(req.socket.remoteAddress || "") || req.socket.remoteAddress || "?";
+  function clientIp(req) {
+    const peer = peerIp(req);
+    if (cfg.trustProxy && sec.isLoopback(peer)) {
+      const cf = sec.normIp(String(req.headers["cf-connecting-ip"] || ""));
+      if (cf) return cf;
+      const xff = String(req.headers["x-forwarded-for"] || "");
+      if (xff) { const last = sec.normIp(xff.split(",").at(-1)); if (last) return last; } // the hop our trusted proxy saw
+    }
+    return peer;
+  }
+  function scheme(req) {
+    if (cfg.trustProxy && sec.isLoopback(peerIp(req))) {
+      const fp = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+      if (fp === "http" || fp === "https") return fp;
+    }
+    return cfg.tls ? "https" : "http";
+  }
+  const bearer = (req) => { const h = String(req.headers.authorization || ""); return h.slice(0, 7).toLowerCase() === "bearer " ? h.slice(7).trim() : ""; };
+  const eq = (a, b) => { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && sec_timingSafeEqual(x, y); };
+  const isCredential = (header) => {
+    const tok = header.slice(0, 7).toLowerCase() === "bearer " ? header.slice(7).trim() : "";
+    return !!tok && (tok.startsWith(sec.SESSION_PREFIX) || cfg.apiKeys.some((k) => eq(tok, k)));
+  };
+  function principal(req, ip) {
+    const tok = bearer(req);
+    if (tok) {
+      let found = null;
+      for (const k of cfg.apiKeys) if (eq(tok, k)) found = k; // no early exit: constant work per request
+      if (found !== null) return ["key", cfg.kid.get(found)];
+      if (cfg.antibot && cfg.antibot.validToken(tok, ip)) return ["session", ip];
+    }
+    return cfg.requireAuth ? null : ["anon", ip];
+  }
+  function denyAuth(res, ip) {
+    const banned = cfg.bans.strike(ip);
+    send(res, 401, err("invalid or missing credentials", "invalid_request_error", "invalid_api_key"), { "WWW-Authenticate": 'Bearer realm="llmf"' });
+    if (banned) cfg.log({ event: "ban", ip });
+  }
+
+  /** API / session routes: refuse DNS rebinding (foreign Host on a loopback server) and cross-site browser requests. */
+  function guard(req, res) {
+    const host = hostOf(req.headers.host || "");
+    if (cfg.loopbackOnly && !(host && LOOPBACK.test(host))) { send(res, 421, err("unexpected Host header", "invalid_request_error", "bad_host")); return false; }
+    const origin = req.headers.origin;
+    if (origin !== undefined) {
+      const o = String(origin).replace(/\/+$/, "");
+      let same = false;
+      try { same = new URL(o).host.toLowerCase() === String(req.headers.host || "").toLowerCase(); } catch { /* not a URL */ }
+      if (!cfg.cors && !cfg.corsOrigins.includes(o) && !same) { send(res, 403, err("cross-site request refused (use --cors / --cors-origin to allow it)", "invalid_request_error", "bad_origin")); return false; }
+    }
+    return true;
+  }
+
+  // ------------------------------------------------------------ body
+  function readBody(req, res, limit) {
+    return new Promise((resolve) => {
+      if (/chunked/i.test(String(req.headers["transfer-encoding"] || ""))) { send(res, 411, err("Content-Length required", "invalid_request_error")); return resolve(null); }
+      const raw = req.headers["content-length"];
+      const n = raw === undefined || raw === "" ? NaN : Number(raw);
+      if (!Number.isFinite(n) || n < 0) { send(res, 411, err("Content-Length required", "invalid_request_error")); return resolve(null); }
+      if (n > limit) { send(res, 413, err("request too large", "invalid_request_error")); return resolve(null); }
+      const chunks = [];
+      let got = 0;
+      req.on("data", (c) => { got += c.length; if (got <= n) chunks.push(c); });
+      req.on("end", () => resolve(Buffer.concat(chunks)));
+      req.on("error", () => resolve(null));
     });
-  });
+  }
+  async function readJson(req, res, limit) {
+    const buf = await readBody(req, res, limit);
+    if (buf === null) return null;
+    try {
+      const body = JSON.parse(buf.toString() || "{}");
+      if (body === null || typeof body !== "object" || Array.isArray(body)) throw new TypeError("JSON object expected");
+      return body;
+    } catch (e) { send(res, 400, err(`bad request: ${e.message}`, "invalid_request_error")); return null; }
+  }
 
-  const authed = (req) => {
-    if (!keys.length) return true;
-    const h = req.headers.authorization || "";
-    const tok = h.slice(0, 7).toLowerCase() === "bearer " ? h.slice(7).trim() : "";
-    return keys.reduce((ok, k) => safeEqual(tok, k) || ok, false);
-  };
+  // ------------------------------------------------------------ /_llmf/*
+  async function internal(req, res, path, ip) {
+    const ro = req.method === "GET" || req.method === "HEAD";
+    if ((path === "/_llmf/client.js" || path === "/_llmf/ui.js") && ro && cfg.sessions) return bytes(res, asset(path.split("/").pop()), "text/javascript; charset=utf-8");
+    if (!cfg.sessions || !cfg.antibot) return send(res, 404, err("not found", "invalid_request_error", "not_found"));
+    const ab = cfg.antibot;
+    if (path === "/_llmf/config" && ro) return send(res, 200, { ...ab.config(), session: true });
+    if (path === "/_llmf/challenge" && ro) {
+      const [ok, wait] = cfg.challengeLimiter.allow("c:" + ip);
+      if (!ok) return limited(res, wait, "too many challenges");
+      try { return send(res, 200, ab.challenge(ip)); } catch (e) { return send(res, 400, err(e.message, "invalid_request_error")); }
+    }
+    if (path === "/_llmf/session" && req.method === "POST") {
+      const [ok, wait] = cfg.challengeLimiter.allow("c:" + ip);
+      if (!ok) return limited(res, wait, "too many session requests");
+      const body = await readJson(req, res, 4096);
+      if (body === null) return undefined;
+      try {
+        const out = await ab.session(ip, body);
+        res.llmfWho = "session-new";
+        return send(res, 200, out);
+      } catch (e) {
+        if (!(e instanceof sec.PermissionDenied)) throw e;
+        cfg.bans.strike(ip);
+        return send(res, 403, err(e.message, "invalid_request_error", "antibot_failed"));
+      }
+    }
+    return send(res, 404, err("not found", "invalid_request_error", "not_found"));
+  }
 
+  // ------------------------------------------------------------ /v1
   const pickModel = (requested) => {
     if (typeof requested !== "string" || ["", "auto", "default"].includes(requested.trim().toLowerCase())) return null;
     try { client._reg.resolve(requested); return requested; } catch (e) {
-      if (e instanceof ModelNotFound) { if (strictModels) throw e; return null; } // unknown name from a client app (e.g. "gpt-4o") -> automatic
+      if (e instanceof ModelNotFound) { if (cfg.strictModels) throw e; return null; } // unknown name from a client app (e.g. "gpt-4o") -> automatic
       throw e;
     }
   };
 
-  async function chat(req, res, body) {
+  function validate(body, kind) {
     const msgs = body.messages;
-    if (!Array.isArray(msgs) || !msgs.length) return send(res, 400, err("bad request: messages must be a non-empty list", "invalid_request_error"));
+    if (!Array.isArray(msgs) || !msgs.length) return "bad request: messages must be a non-empty list";
+    const limitMsgs = { session: 40, key: 200 }[kind] ?? 1000;
+    if (msgs.length > limitMsgs) return `too many messages (max ${limitMsgs})`;
+    let chars = 0;
+    for (const m of msgs) {
+      if (m === null || typeof m !== "object" || typeof m.role !== "string") return "bad request: every message needs a role";
+      const c = m.content;
+      if (typeof c === "string") chars += c.length;
+      else if (Array.isArray(c)) {
+        for (const part of c) {
+          if (part === null || typeof part !== "object") return "bad request: malformed content part";
+          if (part.type === "text") chars += String(part.text ?? "").length;
+          else if (kind === "session") return "images are not allowed for web sessions";
+        }
+      } else if (c !== null && c !== undefined) return "bad request: content must be a string or a list";
+    }
+    if (kind === "session") {
+      if (chars > 24000) return "conversation too long for a web session (max 24000 characters)";
+      delete body.tools;
+    }
+    const cap = kind === "session" ? Number(cfg.sessionMaxTokens) : Number(cfg.maxTokensCap);
+    if (cap > 0) {
+      for (const key of ["max_tokens", "max_completion_tokens"]) {
+        let v = body[key];
+        if (v === undefined || v === null) continue;
+        v = Number(v);
+        if (!Number.isFinite(v)) return "max_tokens must be an integer";
+        delete body[key];
+        body.max_tokens = Math.min(Math.trunc(v), cap);
+      }
+    }
+    return null;
+  }
+
+  async function api(req, res, route, ip) {
+    const ro = req.method === "GET" || req.method === "HEAD";
+    if (route === "/models" && ro) {
+      const who = principal(req, ip);
+      if (!who) return denyAuth(res, ip);
+      res.llmfWho = `${who[0]}:${who[0] === "key" ? who[1] : ""}`;
+      if (who[0] === "key") { const [ok, wait] = cfg.keyLimiter.allow("k:" + who[1]); if (!ok) return limited(res, wait, "rate limit reached, retry shortly"); }
+      const now = Math.floor(Date.now() / 1000);
+      const ids = [...ALIASES, ...(await client.models.list()).map((m) => m.name)];
+      return send(res, 200, { object: "list", data: ids.map((id) => ({ id, object: "model", created: now, owned_by: "llmf" })) });
+    }
+    if (route !== "/chat/completions" || req.method !== "POST") return send(res, 404, err(`not found: ${req.url.split("?")[0]}`, "invalid_request_error", "not_found"));
+    const who = principal(req, ip);
+    if (!who) return denyAuth(res, ip);
+    const kind = who[0];
+    res.llmfWho = `${kind}:${kind === "key" ? who[1] : ""}`;
+    let ok = true, wait = 0;
+    if (kind === "key") [ok, wait] = cfg.keyLimiter.allow("k:" + who[1]);
+    else if (kind === "session") [ok, wait] = cfg.sessionLimiter.allow("s:" + ip);
+    if (!ok) return limited(res, wait, "rate limit reached, retry shortly");
+    const body = await readJson(req, res, Number(cfg.maxBody));
+    if (body === null) return undefined;
+    const bad = validate(body, kind);
+    if (bad) return send(res, 400, err(bad, "invalid_request_error"));
+    if (cfg.maxConcurrent && active >= cfg.maxConcurrent) return limited(res, 1, "server is busy, retry shortly", "busy");
+    active++;
+    try { await chat(req, res, body); } finally { active--; }
+    return undefined;
+  }
+
+  const upstreamMsg = (e) => (cfg.public ? "all upstream providers failed" : e.message);
+
+  async function chat(req, res, body) {
     let model;
     try { model = pickModel(body.model); } catch (e) { return send(res, 404, err(e.message, "invalid_request_error", "model_not_found")); }
-    const o = { ...callOptions(body), model, fallback: fallback ? true : null };
+    const o = { ...callOptions(body), model, fallback: cfg.fallback ? true : null };
     try {
-      if (body.stream) return await streamOut(res, client.stream(msgs, o), model);
-      const reply = await client.chat(msgs, o);
+      if (body.stream) return await streamOut(req, res, client.stream(body.messages, o));
+      const reply = await client.chat(body.messages, o);
+      res.llmfModel = `${reply.provider}/${reply.model}`;
       return send(res, 200, ChatCompletion.fromReply(reply));
     } catch (e) {
-      if (e instanceof AllProvidersFailed) return send(res, 502, err(e.message, "upstream_error", "all_providers_failed"));
+      if (e instanceof AllProvidersFailed) return send(res, 502, err(upstreamMsg(e), "upstream_error", "all_providers_failed"));
       if (e instanceof LLMFError || e instanceof TypeError) return send(res, 400, err(e.message, "invalid_request_error"));
       throw e;
     }
   }
 
-  async function streamOut(res, st) {
+  async function streamOut(req, res, st) {
     const it = st[Symbol.asyncIterator]();
+    let closed = false;
+    res.once("close", () => { closed = true; it.return?.().catch?.(() => {}); });
     const first = await it.next(); // fallback between providers happens here, before any bytes
     const id = "chatcmpl-" + randomHex(12), created = Math.floor(Date.now() / 1000), model = `${st.provider}/${st.model}`;
+    res.llmfModel = model;
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", "X-Accel-Buffering": "no" });
-    const out = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    const out = (obj) => { if (!closed) res.write(`data: ${JSON.stringify(obj)}\n\n`); };
     out(new ChatCompletionChunk(id, created, model, { role: "assistant", content: "" }));
     if (!first.done) out(new ChatCompletionChunk(id, created, model, { content: first.value }));
     try {
-      for (let r = first.done ? first : await it.next(); !r.done; r = await it.next()) out(new ChatCompletionChunk(id, created, model, { content: r.value }));
+      for (let r = first.done ? first : await it.next(); !r.done && !closed; r = await it.next()) out(new ChatCompletionChunk(id, created, model, { content: r.value }));
       out(new ChatCompletionChunk(id, created, model, {}, "stop"));
     } catch (e) {
       if (!(e instanceof LLMFError)) throw e;
-      out(err(e.message, "upstream_error"));
+      out(err(cfg.public ? "upstream error" : e.message, "upstream_error"));
     }
-    res.write("data: [DONE]\n\n");
-    res.end();
+    if (!closed) { res.write("data: [DONE]\n\n"); res.end(); }
   }
 
-  return http.createServer(async (req, res) => {
-    try {
-      res.setHeader("X-Content-Type-Options", "nosniff");
-      if (cors) {
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        res.setHeader("Access-Control-Allow-Headers", "authorization, content-type");
-        res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-      }
-      // Local server vs. web pages: refuse DNS rebinding (foreign Host on a loopback-bound server) and cross-site requests.
-      const hostHdr = hostOf(req.headers.host || "");
-      if (bindHost && LOOPBACK.test(bindHost) && !(hostHdr && LOOPBACK.test(hostHdr))) return send(res, 421, err("unexpected Host header", "invalid_request_error", "bad_host"));
-      const origin = req.headers.origin;
-      if (origin !== undefined) {
-        const allowed = cors || corsOrigins.includes(origin) || (() => { try { return new URL(origin).host === req.headers.host; } catch { return false; } })();
-        if (!allowed) return send(res, 403, err("cross-site request refused (use --cors / --cors-origin to allow it)", "invalid_request_error", "bad_origin"));
-        if (!cors) { res.setHeader("Access-Control-Allow-Origin", origin); res.setHeader("Vary", "Origin"); res.setHeader("Access-Control-Allow-Headers", "authorization, content-type"); res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS"); }
-      }
-      const path = new URL(req.url, "http://x").pathname.replace(/\/+$/, "") || "/";
-      if (req.method === "OPTIONS") { res.writeHead(cors || origin !== undefined ? 204 : 405); return res.end(); }
-      if (path === "/health" || path === "/") return send(res, 200, { status: "ok", service: "llmf" });
-      const route = path.startsWith("/v1/") ? path.slice(3) : path; // legacy un-prefixed form also works
-      if (route === "/models" && req.method === "GET") {
-        if (!authed(req)) return send(res, 401, err("invalid or missing credentials", "invalid_request_error", "invalid_api_key"), { "WWW-Authenticate": 'Bearer realm="llmf"' });
-        const now = Math.floor(Date.now() / 1000);
-        const ids = [...ALIASES, ...(await client.models.list()).map((m) => m.name)];
-        return send(res, 200, { object: "list", data: ids.map((id) => ({ id, object: "model", created: now, owned_by: "llmf" })) });
-      }
-      if (route === "/chat/completions" && req.method === "POST") {
-        if (!authed(req)) return send(res, 401, err("invalid or missing credentials", "invalid_request_error", "invalid_api_key"), { "WWW-Authenticate": 'Bearer realm="llmf"' });
-        if (maxConcurrent && active >= maxConcurrent) return send(res, 429, err("server busy: too many requests in flight, retry shortly", "rate_limit_error", "busy"), { "Retry-After": "1" });
-        active++;
-        try {
-          const body = await readJson(req, res);
-          if (body) await chat(req, res, body);
-        } finally { active--; }
-        return undefined;
-      }
-      return send(res, 404, err(`not found: ${path}`, "invalid_request_error", "not_found"));
-    } catch (e) {
-      if (!res.headersSent) send(res, 500, err("internal error", "server_error"));
-      else res.end();
-    }
-  });
-}
+  // ------------------------------------------------------------ web: ui / files / app
+  function uiCsp() {
+    const ts = cfg.antibot?.mode === "turnstile";
+    const cf = " https://challenges.cloudflare.com";
+    return `default-src 'self'; script-src 'self'${ts ? cf : ""}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-src${ts ? cf : " 'none'"}; base-uri 'none'; form-action 'self'; frame-ancestors 'self'`;
+  }
 
-/** Start listening; resolves with the ``http.Server`` once it is up. */
-export function serve(client, { host = "127.0.0.1", port = 8000, ...opts } = {}) {
-  const server = createServer(client, { bindHost: host, ...opts });
+  async function site(req, res, path, ip) {
+    const p = path.replace(/\/+$/, "") || "/";
+    const ro = req.method === "GET" || req.method === "HEAD";
+    const showUi = cfg.ui && (p === "/chat" || ((p === "/" || p === "/index.html") && !cfg.static && cfg.appPort === null));
+    if (showUi && ro) return bytes(res, asset("chat.html"), "text/html; charset=utf-8", { "Content-Security-Policy": uiCsp() });
+    if (cfg.appPort !== null) {
+      let body = null;
+      if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method) || req.headers["content-length"]) {
+        body = await readBody(req, res, APP_MAX_BODY);
+        if (body === null) return undefined;
+      }
+      for (const h of ["X-Content-Type-Options", "Referrer-Policy", "X-Frame-Options", "Permissions-Policy", "Strict-Transport-Security"]) res.removeHeader(h);
+      res.llmfWho = "app";
+      await proxyRequest(req, res, cfg.appPort, { body, clientIp: ip, scheme: scheme(req), dropAuth: isCredential, fail: (code, msg, type) => send(res, code, err(msg, type)) });
+      return undefined;
+    }
+    if (cfg.static) {
+      if (!ro) return send(res, 405, err("method not allowed", "invalid_request_error"), { Allow: "GET, HEAD" });
+      const f = cfg.static.find(path);
+      if (!f) return send(res, 404, err("not found", "invalid_request_error", "not_found"));
+      let st;
+      try { st = fs.statSync(f); } catch { return send(res, 404, err("not found", "invalid_request_error", "not_found")); }
+      res.writeHead(200, { "Content-Type": contentType(f), "Content-Length": st.size, "Cache-Control": "no-cache" });
+      if (req.method === "HEAD") return res.end();
+      const rs = fs.createReadStream(f);
+      rs.on("error", () => res.destroy());
+      rs.pipe(res);
+      return new Promise((resolve) => res.once("close", resolve));
+    }
+    return send(res, 404, err("not found", "invalid_request_error", "not_found"));
+  }
+
+  // ------------------------------------------------------------ entry
+  async function dispatch(req, res, ip) {
+    if ((cfg.deny.length && sec.ipIn(ip, cfg.deny)) || (cfg.allow.length && !sec.ipIn(ip, cfg.allow))) return send(res, 403, err("forbidden", "invalid_request_error", "forbidden"));
+    const left = cfg.bans.banned(ip);
+    if (left) return limited(res, left, "temporarily blocked", "blocked");
+    const [ok, wait] = cfg.ipLimiter.allow("ip:" + ip);
+    if (!ok) return limited(res, wait, "too many requests");
+    const path = new URL(req.url, "http://x").pathname || "/";
+    if (req.method === "OPTIONS") {
+      const origin = String(req.headers.origin || "").replace(/\/+$/, "");
+      const allowed = cfg.cors || (origin && (cfg.corsOrigins.includes(origin) || (() => { try { return new URL(origin).host === req.headers.host; } catch { return false; } })()));
+      res.writeHead(allowed ? 204 : 405, { "Content-Length": 0 });
+      return res.end();
+    }
+    const webOnly = path !== "/health" && !path.startsWith("/_llmf/") && path !== "/v1" && !path.startsWith("/v1/");
+    const hasSite = !!(cfg.static || cfg.appPort !== null || cfg.ui);
+    if (!(webOnly && hasSite) && !guard(req, res)) return undefined;
+    if (path === "/health") return send(res, 200, { status: "ok", service: "llmf" });
+    if (path.startsWith("/_llmf/")) return internal(req, res, path, ip);
+    if (path === "/v1" || path.startsWith("/v1/")) return api(req, res, path.slice(3).replace(/\/+$/, ""), ip);
+    if (!hasSite) {
+      if (path === "/" || path === "") return send(res, 200, { status: "ok", service: "llmf" });
+      const legacy = path.replace(/\/+$/, "");
+      if (legacy === "/models" || legacy === "/chat/completions") return api(req, res, legacy, ip); // legacy un-prefixed form
+      return send(res, 404, err(`not found: ${path}`, "invalid_request_error", "not_found"));
+    }
+    return site(req, res, path, ip);
+  }
+
+  const handler = async (req, res) => {
+    const t0 = Date.now();
+    res.req = req;
+    let ip = "?";
+    res.once("close", () => cfg.log({ ip, m: req.method, path: String(req.url).split("?")[0].slice(0, 200), status: res.statusCode, ms: Date.now() - t0, who: res.llmfWho || "-", model: res.llmfModel ?? null }));
+    try {
+      ip = clientIp(req);
+      applyHeaders(req, res);
+      await dispatch(req, res, ip);
+    } catch (e) { // never leak internals to the client
+      cfg.log({ event: "error", ip, error: `${e?.name}: ${e?.message}` });
+      if (!res.headersSent) send(res, 500, err("internal error", "server_error"));
+      else res.destroy();
+    }
+  };
+
+  let server;
+  if (cfg.tlsCert) {
+    let cert, key;
+    try { cert = fs.readFileSync(cfg.tlsCert); key = fs.readFileSync(cfg.tlsKey || cfg.tlsCert); } catch (e) { throw new ConfigError(`cannot load the TLS certificate/key (${cfg.tlsCert}): ${e.message}`); }
+    try { server = https.createServer({ cert, key, minVersion: "TLSv1.2" }, handler); } catch (e) { throw new ConfigError(`cannot load the TLS certificate/key (${cfg.tlsCert}): ${e.message}`); }
+    server.on("tlsClientError", () => {}); // probes / resets are noise
+  } else server = http.createServer(handler);
+  server.on("clientError", (e, sock) => { try { sock.end("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 62\r\n\r\n" + JSON.stringify(err("Bad Request", "invalid_request_error", "bad_request"))); } catch { sock.destroy(); } });
+  server.llmf = cfg;
   server.keepAliveTimeout = 5000;
   server.headersTimeout = 30000; // a client that never finishes its request cannot hold a socket forever
   server.requestTimeout = 60000;
-  return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen({ host, port, backlog: 128 }, () => resolve(server));
-  });
+  if (cfg.public) server.maxConnections = Number(cfg.maxConnections || 256);
+  else if (cfg.maxConnections) server.maxConnections = Number(cfg.maxConnections);
+  return server;
+}
+
+
+/**
+ * Start listening; resolves with the ``http.Server`` once it is up (option errors throw synchronously).
+ * Extra options: ``cloudflare`` / ``tunnelToken`` (need ``cloudflared``; imply ``public``), ``app`` (a command to run
+ * and proxy to), ``appDir``. ``server.llmf.publicUrl`` holds the tunnel URL; closing the server stops child and tunnel.
+ */
+export function serve(client, { host, port = 8000, cloudflare = false, tunnelToken = null, app = null, appDir = null, log = (s) => console.error(s), ...opts } = {}) {
+  const tunnelled = !!(cloudflare || tunnelToken);
+  if (tunnelled) { opts.public = true; opts.trustProxy = true; } // reachable from the internet: use the hardening profile, cloudflared connects from loopback
+  if (app && !opts.appPort) opts.appPort = 3000;
+  if (!Number.isInteger(Number(port)) || port < 0 || port > 65535) throw new ConfigError("--port must be between 0 and 65535");
+  const bind = host ?? (opts.public && !tunnelled ? "0.0.0.0" : "127.0.0.1");
+  const server = createServer(client, { bindHost: bind, ...opts });
+  const cfg = server.llmf;
+  return (async () => {
+    await new Promise((resolve, reject) => { server.once("error", reject); server.listen({ host: bind, port, backlog: 128 }, resolve); });
+    server.removeAllListeners("error");
+    server.on("error", () => {});
+    let child = null, tunnel = null;
+    const shutdown = () => { tunnel?.stop(); child?.stop(); cfg.close(); };
+    server.once("close", shutdown);
+    try {
+      const p = server.address().port;
+      if (app) {
+        const key = cfg.apiKeys[0] || "llmf-local";
+        const base = `${cfg.tls ? "https" : "http"}://127.0.0.1:${p}/v1`;
+        child = new AppProcess(app, Number(cfg.appPort), { cwd: appDir, log, env: { LLMF_BASE_URL: base, OPENAI_BASE_URL: base, OPENAI_API_KEY: key, LLMF_API_KEY: key } });
+        await child.start();
+      }
+      if (tunnelled) {
+        tunnel = new Tunnel(p, { token: tunnelToken, scheme: cfg.tls ? "https" : "http" });
+        cfg.publicUrl = await tunnel.start();
+      }
+    } catch (e) {
+      server.close();
+      shutdown();
+      if (e instanceof TunnelError || e instanceof Error) throw Object.assign(new Error(e.message), { code: "ELLMF" });
+      throw e;
+    }
+    cfg.tunnelled = tunnelled;
+    return server;
+  })();
 }
 
 export { PARAMS };

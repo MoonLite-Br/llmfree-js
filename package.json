@@ -1,6 +1,6 @@
 {
   "name": "llmf",
-  "version": "0.6.3",
+  "version": "0.7.1",
   "description": "llmf (llmfree): one dead-simple call for free, keyless LLM endpoints, with automatic fallback.",
   "type": "module",
   "main": "./src/index.js",
@@ -16,12 +16,12 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "CHANGELOG.md",
-    "LICENSE",
-    "README.md",
+    "src",
     "bin",
     "index.d.ts",
-    "src"
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"

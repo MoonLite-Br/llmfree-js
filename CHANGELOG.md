@@ -4,6 +4,31 @@ The npm package is a port of the Python package [`llmf`](https://pypi.org/projec
 changelog step by step: each version here adds the same feature as the Python release with the same number.
 Where the JavaScript line differs, the entry says so.
 
+## 0.7.1
+- `llmf-js -h` now renders like the Python CLI on Python 3.14: same layout (`-m, --model MODEL`, `-h` first, help column 24,
+  wrapped to the terminal width, the custom `usage:` block) and the same colours (blue headings, magenta usage, green short
+  flags, cyan long flags, yellow metavars). Colour only on a terminal; `NO_COLOR`, `TERM=dumb` switch it off, `FORCE_COLOR` forces it.
+  Argument errors use the same coloured usage + `llmf-js: error: ...`.
+
+## 0.7.0
+The internet-facing server of Python 0.7.0, ported to Node (same flags, same banner, same limits).
+- **`llmf-js serve --public`**: binds `0.0.0.0`, API key mandatory (generated and printed if you give none), per-key / per-IP
+  token-bucket rate limits (`429` + `Retry-After`), temporary ban after repeated bad keys, body / `max_tokens` caps, security
+  headers (nosniff, no-referrer, X-Frame-Options, HSTS on TLS), generic error messages, connection cap (256).
+- Flags: repeatable `--api-key`, `--api-keys-file`, `--rate`, `--ip-rate`, `--session-rate`, `--allow-ip` / `--deny-ip` (CIDR),
+  `--trust-proxy` (`CF-Connecting-IP` / `X-Forwarded-For`, honoured only from a loopback peer), `--cors-origin`,
+  `--max-body`, `--max-tokens-cap`, `--tls-cert` / `--tls-key`, `--log-file` (JSON lines; prompts and keys never logged), `--csp`.
+- **Anti-bot** for web pages: `--antibot pow` (default when public: stateless HMAC proof of work solved in the browser, IP-bound
+  session token, replay protection, rising difficulty for noisy IPs) or `--antibot turnstile` (verified server-side, fail-closed),
+  `--pow-bits`. Web sessions: no images / tools, 40 messages, 24k chars, `max_tokens` 1024, own rate limit.
+  Browser helper at `/_llmf/client.js` (`llmf.chat()`, `llmf.stream()`, `llmf.fetch()`).
+- **`--ui`** built-in chat page (streaming, history in localStorage, text nodes only); **`--web PATH`** (alias `--html`): one HTML
+  file or a static directory (no `..`, no dotfiles, no symlink escape, SPA fallback); **`--app "node main.js"`** (+ `--app-port`,
+  `--app-dir`): runs your project as a child (`$PORT`, `$OPENAI_BASE_URL`, `$OPENAI_API_KEY`) and reverse-proxies to it.
+- **`--cloudflare`** / `--tunnel-token`: your own `cloudflared` (quick or named tunnel); prints the public URL.
+- CLI parity with the Python `llmf`: one flag table drives parsing and an argparse-style `--help`; bad values print
+  `usage ...` + `llmf-js: error: ...` (exit 2); `serve` prints the same banner (`API`, `chat UI`, `web`, `app`, `public`, `api key`, `security`).
+
 ## 0.6.3
 Brings the Python 0.7.4 security audit that applies to the npm package (the public-server parts arrive with 0.7.0).
 - **CLI name:** the npm package installs only `llmf-js` (no more `llmf` bin), so it lives next to the Python `llmf`

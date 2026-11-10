@@ -1,24 +1,19 @@
 /** llmf (llmfree) — free, keyless LLM client for Node.js. */
 export const version: string;
-
 export class LLMFError extends Error {}
 export class ProviderError extends LLMFError {}
-export class AllProvidersFailed extends LLMFError {
-  errors: unknown[];
-}
+export class AllProvidersFailed extends LLMFError { errors: unknown[]; }
 export class ModelNotFound extends LLMFError {}
-
 export class Reply extends String {
   provider?: string;
   model?: string;
   reasoning?: string;
 }
-
 export interface ClientOptions {
   timeout?: number;
   deadline?: number;
   proxy?: string;
-  routing?: "ranked" | "adaptive" | string;
+  routing?: string;
   race?: number;
   transport?: string;
   model?: string;
@@ -27,14 +22,11 @@ export interface ClientOptions {
   impersonate?: string;
   [key: string]: unknown;
 }
-
 export class Client {
   constructor(options?: ClientOptions);
   chat: {
     (prompt: string, options?: ClientOptions): Promise<Reply>;
-    completions: {
-      create(params: Record<string, unknown>): Promise<unknown>;
-    };
+    completions: { create(params: Record<string, unknown>): Promise<unknown> };
   };
   stream(prompt: string, options?: ClientOptions): AsyncIterable<unknown>;
   session(system?: string, defaults?: ClientOptions): (prompt: string) => Promise<Reply>;
@@ -48,17 +40,10 @@ export class Client {
   health: { check(options?: object): Promise<unknown> };
   register(name: string, baseUrl: string, models?: string[], options?: object): void;
 }
-
 export const LLMF: typeof Client;
 export function defaultClient(): Client;
 export function configure(options: ClientOptions): Client;
-export function register(
-  name: string,
-  baseUrl: string,
-  models?: string[],
-  options?: object
-): void;
-
+export function register(name: string, baseUrl: string, models?: string[], options?: object): void;
 export const chat: {
   (prompt: string, options?: ClientOptions): Promise<Reply>;
   completions: { create(params: Record<string, unknown>): Promise<unknown> };
@@ -75,7 +60,6 @@ export const providers: { (): unknown; list(): unknown };
 export const health: { check(options?: object): Promise<unknown> };
 export const tools: Record<string, unknown>;
 export function discover(options?: object): Promise<unknown>;
-
 declare const _default: {
   chat: typeof chat;
   stream: typeof stream;
