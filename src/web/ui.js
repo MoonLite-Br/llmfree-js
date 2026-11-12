@@ -14,7 +14,7 @@
   function add(role, text) {
     var d = document.createElement("div"); d.className = "m " + role;
     var w = document.createElement("b"); w.textContent = role === "user" ? L.you : L.ai;
-    var p = document.createElement("div"); p.className = "t"; p.textContent = text;   // textContent only: no HTML injection
+    var p = document.createElement("div"); p.className = "t"; p.textContent = text;
     d.appendChild(w); d.appendChild(p); log.appendChild(d); log.scrollTop = log.scrollHeight; return p;
   }
   function render() { log.textContent = ""; if (!msgs.length) { var e = document.createElement("p"); e.className = "empty"; e.textContent = L.empty; log.appendChild(e); } msgs.forEach(function (m) { add(m.role, m.content); }); }

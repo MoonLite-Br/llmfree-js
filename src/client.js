@@ -1,4 +1,3 @@
-// The Client: one unified entry point with automatic fallback.
 import * as cache from "./cache.js";
 import { DEFAULT_UA, HTTPFailure, checkProxy, checkTransport } from "./http.js";
 import { buildMessages } from "./messages.js";
@@ -12,14 +11,13 @@ import { now, randomHex, sleep } from "./util.js";
 
 const key = (t) => String(t);
 
-/** Cooldown / rate-limit / latency bookkeeping. */
 class State {
   constructor() {
-    this.cool = new Map(); // provider name or "provider/model" -> monotonic deadline
-    this.last = new Map(); // provider -> last reserved slot
-    this.ewma = new Map(); // "provider/model" -> smoothed latency
+    this.cool = new Map();
+    this.last = new Map();
+    this.ewma = new Map();
     this.demoted = new Set();
-    this.busy = new Map(); // provider -> requests in flight
+    this.busy = new Map();
   }
 
   enter(provider) {
@@ -37,15 +35,13 @@ class State {
     return Math.max(0, wait);
   }
 
-  /** Reserve a request slot; returns seconds to sleep before using it. */
-  /** Reserve a request slot; resolves to seconds to sleep. ``dir`` enables cross-process pacing for slow providers. */
   rateWait(provider, minInterval, dir = null) {
     const t0 = now();
     const track = !!dir && minInterval >= cache.PACE_MIN_INTERVAL;
-    if (track && !this.last.has(provider)) { // first use in this process: honour the previous process's slot
+    if (track && !this.last.has(provider)) {
       const prev = cache.paceLast(dir, provider);
       const wall = Date.now() / 1000;
-      if (prev !== null) this.last.set(provider, t0 - Math.min(Math.max(wall - prev, 0), minInterval + 60)); // a tampered file cannot stall us
+      if (prev !== null) this.last.set(provider, t0 - Math.min(Math.max(wall - prev, 0), minInterval + 60));
     }
     const slot = Math.max(t0, (this.last.get(provider) ?? -1e9) + minInterval);
     this.last.set(provider, slot);
@@ -67,7 +63,6 @@ class State {
     }
   }
 
-  /** Apply earlier ``doctor`` results: failures are demoted, latencies pre-load the EWMA. */
   seed(rows) {
     for (const r of rows) {
       if (!r || r.provider == null || r.model == null) continue;
@@ -81,17 +76,14 @@ class State {
     }
   }
 
-  /** Models whose recent doctor success rate is low sink to the end of every plan. */
   demoteUnreliable(history) {
     for (const [k, h] of Object.entries(history)) if (cache.unreliable(h) && k.includes("/")) this.demoted.add(k);
   }
 
-  /** Targets whose observed latency is <= ``maxLatency`` (not demoted), fastest first. */
   measured(maxLatency) {
     return [...this.ewma].filter(([k, v]) => v <= maxLatency && !this.demoted.has(k)).sort((a, b) => a[1] - b[1]).map(([k]) => k);
   }
 
-  /** Ready targets first (stable); cooling, demoted, rate-slot-busy or *saturated* ones after. */
   order(targets, intervals, adaptive = false, caps = null) {
     const ready = [], later = [];
     targets.forEach((t, i) => {
@@ -104,7 +96,6 @@ class State {
   }
 }
 
-/** Async iterable of text chunks. After exhaustion, ``.reply`` holds the full answer. */
 export class Stream {
   constructor(gen, onDone = null) {
     this.provider = "";
@@ -132,12 +123,11 @@ export class Stream {
   }
 
   async collect() {
-    for await (const _ of this) { /* drain */ } // eslint-disable-line no-unused-vars
+    for await (const _ of this) {   }
     return this.reply;
   }
 }
 
-/** Async iterable of :class:`ChatCompletionChunk` (what ``create({ stream: true })`` returns). */
 export class ChatStream {
   constructor(stream) {
     this._stream = stream;
@@ -147,7 +137,7 @@ export class ChatStream {
   async *_gen() {
     const id = "chatcmpl-" + randomHex(12), created = Math.floor(Date.now() / 1000);
     const it = this._stream[Symbol.asyncIterator]();
-    const first = await it.next(); // fallback between providers happens here
+    const first = await it.next();
     if (first.done) throw new AllProvidersFailed([], "empty stream");
     const model = `${this._stream.provider}/${this._stream.model}`;
     const chunk = (delta, finish = null) => new ChatCompletionChunk(id, created, model, delta, finish);
@@ -170,15 +160,14 @@ export class ChatStream {
   }
 
   async collect() {
-    for await (const _ of this) { /* drain */ } // eslint-disable-line no-unused-vars
+    for await (const _ of this) {   }
     return ChatCompletion.fromReply(this._stream.reply);
   }
 }
 
-const FAST_SECONDS = 1.0; // a measured model at or under this latency may join the dynamic "fast" tag
+const FAST_SECONDS = 1.0;
 const CHECK_PROMPT = "What is the capital of Vietnam? Answer in one short sentence.";
 
-/** ``provider: "ovh", model: "qwen"`` -> ``"ovh/qwen"`` (provider alone -> its default). */
 function join(provider, model) {
   if (!provider) return model;
   if (model != null && typeof model !== "string") throw new TypeError("provider cannot be combined with a list of models");
@@ -186,28 +175,7 @@ function join(provider, model) {
 }
 
 export class Client {
-  /**
-   * @param {object} [o]
-   * @param {string|string[]|null} [o.model] default model/alias for every call (null = automatic chain)
-   * @param {number} [o.timeout=60] seconds per HTTP request
-   * @param {number} [o.deadline=180] overall seconds budget for one call, across all fallbacks
-   * @param {number} [o.maxAttempts=8] hard cap on tries per call
-   * @param {number} [o.retries=1] extra passes over the candidates for *transient* errors
-   * @param {number} [o.maxTokens=1024] default answer budget (reasoning models need >= 200)
-   * @param {string[]} [o.only] / [o.exclude] restrict the providers that may be used
-   * @param {boolean} [o.builtin=true] load the built-in provider catalogue
-   * @param {string} [o.proxy] your own http://, https:// or socks4/4a/5/5h:// proxy URL (never picked or rotated for you)
-   * @param {"ranked"|"adaptive"} [o.routing="ranked"] fixed fallback order, or fastest observed first
-   * @param {number} [o.race=1] send each request to this many providers at once and keep the first answer
-   *   (faster, but uses more of the free quotas)
-   * @param {"node"|"curl"|"auto"} [o.transport="node"] "curl"/"auto": browser-like TLS via a ``curl-impersonate`` binary
-   *   (LLMF_CURL_BIN or on PATH); "auto" falls back to node when it is missing. Still zero npm dependencies.
-   * @param {string} [o.impersonate="chrome"] browser family for the curl transport (chrome, firefox, safari, edge)
-   * @param {number} [o.maxInflight=6] simultaneous requests per provider before extra calls spill to the next one
-   *   (a provider can set its own ``concurrency``)
-   * @param {number} [o.visionTimeout=90] seconds per request when images are attached (image models are slow)
-   * @param {boolean} [o.useCache=true] read/write the ``llmf doctor`` health cache (``LLMF_NO_CACHE=1`` disables)
-   */
+
   constructor({ model = null, timeout = 60, deadline = 180, maxAttempts = 8, retries = 1, maxTokens = 1024,
     temperature = null, only = null, exclude = [], builtin = true, userAgent = DEFAULT_UA, proxy = null,
     routing = "ranked", race = 1, useCache = true, cacheDir = null, visionTimeout = 90, transport = "node", impersonate = "chrome", maxInflight = 6 } = {}) {
@@ -221,7 +189,7 @@ export class Client {
       this._state.seed(cache.load(this._cachePath()));
       this._state.demoteUnreliable(cache.loadHistory(this._cachePath()));
     }
-    // OpenAI-style namespaces; each is also directly callable (llm.chat("hi"), llm.models()).
+
     this.chat = Object.assign((prompt, o) => this._chatImpl(prompt, o), { completions: { create: (p) => this._create(p) } });
     this.models = Object.assign((o) => this._modelsImpl(o), {
       list: (o) => this._modelsImpl(o),
@@ -245,7 +213,6 @@ export class Client {
     return this.cacheDir || cache.cacheDir();
   }
 
-  /** Change settings in place, e.g. ``configure({ timeout: 30, exclude: ["blockrun"] })``. */
   configure(settings) {
     for (const [k, v] of Object.entries(settings)) {
       if (k.startsWith("_") || !(k in this) || typeof this[k] === "function") throw new TypeError(`unknown setting '${k}'`);
@@ -254,8 +221,6 @@ export class Client {
     return this;
   }
 
-  // ------------------------------------------------------------ registration
-  /** Add your own OpenAI-compatible endpoint. ``baseUrl`` usually ends in ``/v1``. */
   register(name, baseUrl, models, { headers = {}, chatPath = "/chat/completions", kind = "openai", vision = false,
     minInterval = 0, front = false, auto = true, concurrency = 0, note = "custom" } = {}) {
     if (!(kind in ADAPTERS)) throw new TypeError(`kind must be one of ${Object.keys(ADAPTERS).sort().join(", ")}`);
@@ -269,7 +234,6 @@ export class Client {
     return spec;
   }
 
-  /** Pull live keyless endpoints from the stillworks API and register them. */
   async discover({ limit = 5 } = {}) {
     let specs;
     try {
@@ -282,13 +246,11 @@ export class Client {
     return specs.map((s) => s.name);
   }
 
-  // --------------------------------------------------------------- introspect
   _providersImpl() {
     return [...this._reg.providers.values()].map((s) => ({ name: s.name, baseUrl: s.chatUrl, kind: s.kind,
       defaultModel: s.default, models: s.models.map((m) => m.id), minInterval: s.minInterval, note: s.note }));
   }
 
-  /** The model catalogue. ``live: true`` also asks each provider for the free *chat* ids it serves now. */
   async _modelsImpl({ live = false, includeNonChat = false } = {}) {
     const hist = this.useCache ? cache.loadHistory(this._cachePath()) : {};
     const out = this._reg.catalog().map((t) => {
@@ -318,7 +280,6 @@ export class Client {
     return Object.fromEntries(specs.map((s, i) => [s.name, rows[i]]));
   }
 
-  /** Quick ping of every provider's default model. */
   async _healthImpl() {
     const msgs = buildMessages("Reply with the single word: ok");
     return Promise.all([...this._reg.providers.values()].map(async (s) => {
@@ -333,7 +294,6 @@ export class Client {
     }));
   }
 
-  /** Call every catalogued model once (providers in parallel, models in sequence). */
   async _checkImpl({ providers = null, includeLive = false, includeLimited = false, includeNonChat = false, timeout = 30, visionTimeout = null,
     prompt = CHECK_PROMPT, onResult = null, save = true } = {}) {
     const reg = this._reg;
@@ -357,7 +317,7 @@ export class Client {
     const msgs = buildMessages(prompt);
     const opts = this._options({ maxTokens: 300 });
     const results = new Map();
-    const vtimeout = visionTimeout ?? Math.max(timeout, 60); // image models are slow
+    const vtimeout = visionTimeout ?? Math.max(timeout, 60);
     await Promise.all([...groups].map(async ([name, list]) => {
       const spec = reg.providers.get(name);
       for (const t of list) {
@@ -389,7 +349,6 @@ export class Client {
     return ordered;
   }
 
-  // ------------------------------------------------------------------ planning
   _options({ maxTokens = null, temperature = null, topP = null, json = false, tools = null, extra = {}, stop = null, proxy = null } = {}) {
     return makeOptions({ maxTokens: maxTokens ?? this.maxTokens, temperature: temperature ?? this.temperature,
       topP, stop, json, tools, extra, userAgent: this.userAgent, proxy: proxy ? checkProxy(proxy) : this.proxy,
@@ -402,7 +361,7 @@ export class Client {
     const base = vision ? reg.tag("vision") : reg.chain();
     const isFast = typeof model === "string" && model.trim().toLowerCase() === "fast";
     const targets = isFast ? reg.tag("fast") : model !== null && model !== undefined ? reg.resolve(model) : [...base];
-    if (isFast) { // "fast" follows measurements: add anything measured quick, sorted by latency
+    if (isFast) {
       const catalog = new Set(reg.catalog().filter((t) => !reg.modelSpec(t.provider, t.model)?.broken).map(key));
       for (const k of this._state.measured(FAST_SECONDS)) {
         const t = reg.catalog().find((c) => key(c) === k);
@@ -421,7 +380,6 @@ export class Client {
     return this._state.order(plan, this._intervals(), this.routing === "adaptive" || isFast);
   }
 
-  /** Live re-ranking of what is left to try: busy / cooling providers go to the back. */
   _reorder(rest) {
     const caps = Object.fromEntries([...this._reg.providers].map(([n, s]) => [n, s.concurrency || this.maxInflight]));
     return this._state.order(rest, this._intervals(), false, caps);
@@ -441,7 +399,6 @@ export class Client {
     return [buildMessages(prompt, system, images), this._plan(join(provider, model), fallback, !!images?.length)];
   }
 
-  /** Split call options into known knobs and provider-specific extras. */
   static _split(o = {}) {
     const { model, provider, system, images, maxTokens, temperature, topP, json, tools, fallback, stop, proxy, ...extra } = o;
     return { call: { model, provider, system, images, fallback }, gen: { maxTokens, temperature, topP, json: !!json, tools, stop, extra, proxy } };
@@ -454,8 +411,6 @@ export class Client {
     }
   }
 
-  // ----------------------------------------------------------------- core: chat
-  /** One try. Resolves to ``[Reply, null]`` or ``[null, ProviderError]`` (never rejects). */
   async _attempt(t, messages, opts, end, errors, attempts) {
     const spec = this._reg.providers.get(t.provider);
     this._state.enter(t.provider);
@@ -470,7 +425,7 @@ export class Client {
       attempts.push({ provider: t.provider, model: t.model, ok: true, latency: lat, error: null });
       return [new Reply(comp.text, { provider: t.provider, model: t.model, reasoning: comp.reasoning, usage: comp.usage,
         finishReason: comp.finishReason, toolCalls: comp.toolCalls, latency: lat, raw: comp.raw, attempts }), null];
-    } catch (e) { // an adapter bug or a freak upstream answer must not abort the fallback chain
+    } catch (e) {
       const err = e instanceof ProviderError ? e : new ProviderError(t.provider, t.model, `unexpected ${e?.name}: ${e?.message}`, { code: "internal" });
       this._state.fail(err);
       errors.push(err);
@@ -481,7 +436,6 @@ export class Client {
     }
   }
 
-  /** Try ``batch`` concurrently; first success wins. Resolves to ``[reply, failures]``. */
   _runBatch(batch, messages, opts, end, errors, attempts) {
     if (batch.length === 1) {
       return this._attempt(batch[0], messages, opts, end, errors, attempts).then(([r, e]) => [r, e ? [[batch[0], e]] : []]);
@@ -491,7 +445,7 @@ export class Client {
       let pending = batch.length, done = false;
       for (const t of batch) {
         this._attempt(t, messages, opts, end, errors, attempts).then(([r, e]) => {
-          if (done) return; // losers finish in the background and are simply discarded
+          if (done) return;
           if (r) { done = true; resolve([r, failures]); return; }
           failures.push([t, e]);
           if (--pending === 0) { done = true; resolve([null, failures]); }
@@ -500,7 +454,6 @@ export class Client {
     });
   }
 
-  /** Ask a question; resolves to a :class:`Reply` (``String(reply)`` is the text). */
   async _chatImpl(prompt, o = {}) {
     const { call, gen } = Client._split(o);
     const [messages, plan] = this._prepare(prompt, call);
@@ -524,7 +477,7 @@ export class Client {
       const left = end - now();
       if (left < 1) throw new AllProvidersFailed(errors, `deadline of ${this.deadline.toFixed(0)}s reached`);
       const pass = Math.floor((pos - 1) / plan.length);
-      if (pass > last) { last = pass; await sleep(Math.min(1, left / 4)); } // starting another pass over the candidates
+      if (pass > last) { last = pass; await sleep(Math.min(1, left / 4)); }
       const [reply, failures] = await this._runBatch(batch, messages, opts, end, errors, attempts);
       if (reply) return reply;
       for (const [t, e] of failures) if (e && !e.retryable) dead.add(key(t));
@@ -532,7 +485,6 @@ export class Client {
     throw new AllProvidersFailed(errors);
   }
 
-  /** ``llm.chat.completions.create({ messages, model, stream, ... })`` - the OpenAI-shaped entry point. */
   _create(params = {}) {
     const { messages, stream = false, n, max_completion_tokens, max_tokens, response_format, top_p, ...rest } = params;
     if (n != null && n !== 1) throw new TypeError("n > 1 is not supported");
@@ -545,11 +497,6 @@ export class Client {
     return this._chatImpl(messages, o).then((r) => ChatCompletion.fromReply(r));
   }
 
-  // --------------------------------------------------------------- core: stream
-  /**
-   * Like :meth:`chat` but yields text chunks as they arrive: ``for await (const piece of llm.stream("hi"))``.
-   * Fallback happens only *before* the first chunk; after that a failure throws.
-   */
   stream(prompt, o = {}, _onDone = null) {
     const { call, gen } = Client._split(o);
     const [messages, plan] = this._prepare(prompt, call);
@@ -621,7 +568,6 @@ export class Client {
   }
 }
 
-/** Multi-turn conversation that remembers history. */
 export class Session {
   constructor(client, system = null, defaults = {}) {
     this._client = client;

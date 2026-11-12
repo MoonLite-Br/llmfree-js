@@ -1,8 +1,3 @@
-// Pure Node SOCKS4 / SOCKS4a / SOCKS5 / SOCKS5h client.
-//
-//   socks5://user:pass@host:1080   (hostnames resolved locally)
-//   socks5h://host:1080            (hostnames resolved by the proxy)
-//   socks4://host:1080, socks4a://host:1080
 import net from "node:net";
 import dns from "node:dns/promises";
 import { domainToASCII } from "node:url";
@@ -14,7 +9,6 @@ const SOCKS5_ERRORS = {
   5: "connection refused", 6: "TTL expired", 7: "command not supported", 8: "address type not supported",
 };
 
-/** Handshake with the SOCKS proxy failed. */
 export class SocksError extends Error {
   constructor(message) {
     super(message);
@@ -31,7 +25,6 @@ export function parse(url) {
     user: u.username ? decodeURIComponent(u.username) : null, password: u.password ? decodeURIComponent(u.password) : null };
 }
 
-/** Buffered exact-length reader. Uses 'data' events so the socket stays in flowing mode for whoever takes it over. */
 function reader(sock) {
   let buf = Buffer.alloc(0);
   let ended = null;
@@ -72,7 +65,6 @@ function ipv6Bytes(ip) {
 
 const ipBytes = (ip) => (net.isIPv4(ip) ? Buffer.from(ip.split(".").map(Number)) : ipv6Bytes(ip));
 
-/** Open a TCP tunnel to ``host:port`` through ``proxy`` (a parsed proxy); resolves with the connected socket. */
 export async function connect(proxy, host, port, timeoutMs = 60000) {
   const sock = net.connect({ host: proxy.host, port: proxy.port });
   sock.setTimeout(timeoutMs, () => sock.destroy(Object.assign(new Error("timed out"), { code: "ETIMEDOUT" })));
@@ -110,7 +102,7 @@ async function socks5(sock, r, p, host, port) {
     throw new SocksError("SOCKS5 proxy offers no acceptable authentication method");
   }
   let ip = net.isIP(host) ? host : null;
-  if (!ip && p.scheme === "socks5") ip = (await dns.lookup(host)).address; // resolve locally unless socks5h
+  if (!ip && p.scheme === "socks5") ip = (await dns.lookup(host)).address;
   let addr;
   if (ip) {
     addr = Buffer.concat([Buffer.from([net.isIPv4(ip) ? 1 : 4]), ipBytes(ip)]);
@@ -138,7 +130,7 @@ async function socks4(sock, r, p, host, port) {
   if (ip) {
     if (!net.isIPv4(ip)) throw new SocksError("SOCKS4 supports IPv4 only");
     req = Buffer.concat([Buffer.from([4, 1]), portBuf, ipBytes(ip), user]);
-  } else { // socks4a: let the proxy resolve
+  } else {
     req = Buffer.concat([Buffer.from([4, 1]), portBuf, Buffer.from([0, 0, 0, 1]), user, Buffer.from(domainToASCII(host) || host), Buffer.from([0])]);
   }
   sock.write(req);

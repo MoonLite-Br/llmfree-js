@@ -1,8 +1,3 @@
-// ``--cloudflare``: expose the local server through the user's own ``cloudflared`` binary.
-//
-// llmf never downloads or bundles anything: it looks for ``cloudflared`` on PATH and runs
-//   * a free *quick tunnel* (random ``https://*.trycloudflare.com`` URL, no account), or
-//   * a *named tunnel* with ``--tunnel-token`` (your own domain, configured in the Cloudflare dashboard).
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -15,7 +10,7 @@ export class TunnelError extends Error {}
 export function which(name, env = process.env) {
   for (const dir of (env.PATH || "").split(path.delimiter)) {
     const p = path.join(dir, name);
-    try { fs.accessSync(p, fs.constants.X_OK); if (fs.statSync(p).isFile()) return p; } catch { /* next */ }
+    try { fs.accessSync(p, fs.constants.X_OK); if (fs.statSync(p).isFile()) return p; } catch {   }
   }
   return null;
 }
@@ -30,15 +25,15 @@ export class Tunnel {
   argv() {
     if (!this.binary) throw new TunnelError("cloudflared was not found on PATH. Install it (Termux: `pkg install cloudflared`; other systems: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) or set CLOUDFLARED=/path/to/cloudflared");
     const base = [this.binary, "tunnel", "--no-autoupdate"];
-    return this.token ? [...base, "run", "--token", this.token] : [...base, "--url", `${this.scheme}://127.0.0.1:${this.port}`];
+    return this.token ? [...base, "run"] : [...base, "--url", `${this.scheme}://127.0.0.1:${this.port}`];
   }
 
-  /** Start the tunnel; resolves with the public URL (``null`` for a named tunnel: you know your hostname). */
   start(timeout = 60) {
     const argv = this.argv();
-    if (this.scheme === "https" && !this.token) argv.push("--no-tls-verify"); // our own (possibly self-signed) local certificate
+    if (this.scheme === "https" && !this.token) argv.push("--no-tls-verify");
     return new Promise((resolve, reject) => {
-      const proc = (this.proc = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" }));
+      const env = this.token ? { ...process.env, TUNNEL_TOKEN: this.token } : process.env;
+      const proc = (this.proc = spawn(argv[0], argv.slice(1), { env, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" }));
       let done = false;
       const finish = (fn, v) => { if (!done) { done = true; clearTimeout(timer); fn(v); } };
       const pump = (chunk) => {
@@ -59,6 +54,6 @@ export class Tunnel {
   stop() {
     const p = this.proc;
     if (!p || p.exitCode !== null || p.killed) return;
-    try { process.kill(process.platform === "win32" ? p.pid : -p.pid, "SIGTERM"); } catch { try { p.kill(); } catch { /* gone */ } }
+    try { process.kill(process.platform === "win32" ? p.pid : -p.pid, "SIGTERM"); } catch { try { p.kill(); } catch {   } }
   }
 }

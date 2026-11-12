@@ -1,20 +1,16 @@
-// Adapter for chatai.org (CSRF + session cookie, then an SSE chat endpoint).
-//
-// The free tier is limited to a few requests per IP per day. llmf respects that:
-// on the daily-limit 429 the provider is put to sleep for hours instead of retried.
 import { CookieJar, HTTPFailure, decodeBody, openUrl } from "../http.js";
 import { ProviderError } from "../errors.js";
 import { netOf } from "./base.js";
 import { OpenAIAdapter } from "./openai.js";
 
-const SESSION_TTL = 7000; // seconds: the site's session lives ~2h
+const SESSION_TTL = 7000;
 const META = /<meta[^>]+name=["']csrf-token["'][^>]*content=["']([^"']+)["']/i;
 const META_REV = /<meta[^>]+content=["']([^"']+)["'][^>]*name=["']csrf-token["']/i;
 
 export class ChatAIAdapter extends OpenAIAdapter {
   constructor() {
     super();
-    this.sessions = new Map(); // "proxy|baseUrl" -> { jar, csrf, born }
+    this.sessions = new Map();
   }
 
   async _session(spec, ua, timeout, net, force = false) {
@@ -31,7 +27,7 @@ export class ChatAIAdapter extends OpenAIAdapter {
   }
 
   _request(spec, model, messages, opts) {
-    // This endpoint takes just model + messages; it always answers with SSE.
+
     const base = spec.baseUrl.replace(/\/+$/, "");
     const headers = { "Content-Type": "application/json", Accept: "text/event-stream", "User-Agent": opts.userAgent, Origin: base, Referer: base + "/chat", ...spec.headers };
     return [spec.chatUrl, headers, Buffer.from(JSON.stringify({ model, messages }))];
@@ -43,7 +39,7 @@ export class ChatAIAdapter extends OpenAIAdapter {
       try {
         return await openUrl(url, { headers: { ...headers, "X-CSRF-Token": sess.csrf }, data, timeout, ...netOf(opts), jar: sess.jar });
       } catch (e) {
-        if (attempt === 0 && e instanceof HTTPFailure && [401, 403, 419].includes(e.status)) continue; // stale session -> refresh once
+        if (attempt === 0 && e instanceof HTTPFailure && [401, 403, 419].includes(e.status)) continue;
         throw e;
       }
     }
@@ -58,6 +54,6 @@ export class ChatAIAdapter extends OpenAIAdapter {
   }
 
   async listModels() {
-    return []; // no public model listing
+    return [];
   }
 }

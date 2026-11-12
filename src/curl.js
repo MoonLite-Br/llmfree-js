@@ -1,8 +1,3 @@
-// Optional browser-like transport: the ``curl-impersonate`` binary (TLS/HTTP2 fingerprint of a real browser).
-//
-// Not an npm dependency: llmf stays zero-dependency, and uses this only if you ask for it
-// (``transport: "curl"`` / ``"auto"``) and a binary is available: ``LLMF_CURL_BIN=/path/to/curl_chrome116``
-// or any ``curl_chrome*`` / ``curl_ff*`` / ``curl_safari*`` / ``curl-impersonate*`` on PATH.
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -10,7 +5,6 @@ import { PassThrough } from "node:stream";
 
 const FAMILIES = { chrome: /^(curl_chrome|curl-impersonate-chrome)/, firefox: /^(curl_ff|curl-impersonate-ff)/, safari: /^(curl_safari|curl-impersonate-safari)/, edge: /^curl_edge/ };
 
-/** Path of an impersonating curl for ``impersonate`` ("chrome" | "firefox" | "safari" | "edge"), or ``null``. */
 export function findCurl(impersonate = "chrome", env = process.env) {
   if (env.LLMF_CURL_BIN) return fs.existsSync(env.LLMF_CURL_BIN) ? env.LLMF_CURL_BIN : null;
   const re = FAMILIES[String(impersonate).toLowerCase()] || FAMILIES.chrome;
@@ -20,7 +14,7 @@ export function findCurl(impersonate = "chrome", env = process.env) {
     try { names = fs.readdirSync(dir); } catch { continue; }
     for (const n of names) if (re.test(n) && !n.endsWith(".so")) hits.push(path.join(dir, n));
   }
-  hits.sort((a, b) => b.localeCompare(a, undefined, { numeric: true })); // newest browser version first
+  hits.sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
   return hits[0] || null;
 }
 
@@ -28,7 +22,6 @@ export function available(impersonate = "chrome") {
   return findCurl(impersonate) !== null;
 }
 
-/** Name of the transport that would be used: "node" or "curl (path)". */
 export function describe(transport = "node", impersonate = "chrome") {
   if (transport === "node") return "node";
   const bin = findCurl(impersonate);
@@ -50,10 +43,6 @@ function parseHead(text) {
   return { status: Number(m[1]), headers };
 }
 
-/**
- * One request through curl-impersonate. Resolves with an ``IncomingMessage``-like readable
- * (``statusCode``, ``headers``, async-iterable body, ``destroy()`` kills the child process).
- */
 export function curlOnce(url, method, headers, data, timeoutMs, proxy, impersonate = "chrome") {
   const bin = findCurl(impersonate);
   if (!bin) return Promise.reject(Object.assign(new Error("curl-impersonate not found (set LLMF_CURL_BIN)"), { code: "ENOCURL" }));
@@ -75,7 +64,7 @@ export function curlOnce(url, method, headers, data, timeoutMs, proxy, impersona
     child.stdout.on("data", (chunk) => {
       if (settled) { body.write(chunk); return; }
       head = Buffer.concat([head, chunk]);
-      for (;;) { // skip "100 Continue" / proxy CONNECT blocks, stop at the real response
+      for (;;) {
         const end = head.indexOf("\r\n\r\n");
         if (end < 0) return;
         const parsed = parseHead(head.subarray(0, end).toString("latin1"));

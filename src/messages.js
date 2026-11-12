@@ -1,4 +1,3 @@
-// Turn friendly inputs (string / messages / images) into OpenAI-style messages.
 import { readFileSync, statSync } from "node:fs";
 import { extname } from "node:path";
 
@@ -12,7 +11,6 @@ function sniff(buf) {
   return "application/octet-stream";
 }
 
-/** URL / data-URI / local path / raw bytes -> something an API accepts. */
 export function imageUrl(img) {
   if (img instanceof Uint8Array) {
     const buf = Buffer.from(img);
@@ -21,7 +19,7 @@ export function imageUrl(img) {
   const s = String(img);
   if (/^(https?:|data:)/.test(s)) return s;
   let isFile = false;
-  try { isFile = statSync(s).isFile(); } catch { /* not a file */ }
+  try { isFile = statSync(s).isFile(); } catch {   }
   if (isFile) {
     const buf = readFileSync(s);
     return `data:${MIME[extname(s).toLowerCase()] || sniff(buf)};base64,${buf.toString("base64")}`;

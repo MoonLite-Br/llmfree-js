@@ -1,11 +1,3 @@
-// The built-in catalogue of free, keyless endpoints.
-//
-// Policy: a model is listed only if it answered in at least 2 independent real-network runs with a
-// success rate >= 75%. Unknown ids still work (``provider/model`` passes through) and
-// ``llmf doctor --all`` shows what else is live.
-//
-// Order of BUILTIN is the global fallback chain: fastest/cleanest first.
-// Endpoints can disappear at any time - that is exactly why llmf falls back.
 import { model as M, provider } from "./base.js";
 
 const KILO_HEADERS = { Authorization: "Bearer anonymous", "X-KILOCODE-EDITORNAME": "kilo" };
@@ -17,7 +9,7 @@ export const BUILTIN = [
     chatPath: "/v1/chat/completions",
     aliases: ["ch.at"],
     defaultModel: "gpt-4o",
-    minInterval: 0.6, // documented 100 req/min, burst 10
+    minInterval: 0.6,
     concurrency: 8,
     models: [M("gpt-4o", { aliases: ["gpt4o", "4o"] })],
     note: "GPT-4o, no auth, no /models endpoint (only gpt-4o). Documented 100 req/min.",
@@ -25,7 +17,7 @@ export const BUILTIN = [
   provider({
     name: "rewind-ai",
     baseUrl: "https://api.rewind.ai",
-    chatPath: "/v1/chat/completions/", // the trailing slash is required
+    chatPath: "/v1/chat/completions/",
     headers: { Origin: "https://rewind.ai" },
     aliases: ["rewind"],
     defaultModel: "qwen/qwen-2.5-7b-instruct",
@@ -112,7 +104,7 @@ export const BUILTIN = [
     modelsPath: "/v1/models",
     aliases: ["llm7.io"],
     defaultModel: "gpt-oss:20b",
-    minInterval: 1.1, // 429 "Retry after 1 seconds" on back-to-back calls
+    minInterval: 1.1,
     concurrency: 3,
     models: [M("gpt-oss:20b", { aliases: ["gpt-oss"] }), M("codestral-latest", { note: "code model, fast" })],
     note: "Stable and quick. Some larger/other models answer 429 (capacity).",
@@ -181,7 +173,6 @@ export const BUILTIN = [
   }),
 ];
 
-// Intent aliases -> ordered [provider, model] targets.
 export const TAGS = {
   fast: [
     ["llm7", "codestral-latest"],
@@ -209,7 +200,7 @@ export const TAGS = {
     ["ovh", "Qwen2.5-VL-72B-Instruct"],
     ["kilo-openrouter", "nvidia/nemotron-3.5-super-vl:free"],
     ["freeai", "qwen7b"],
-    ["blockrun", "nvidia/llama-3.2-11b-vision"], // last: often 429 capacity
+    ["blockrun", "nvidia/llama-3.2-11b-vision"],
   ],
   reasoning: [
     ["ovh", "gpt-oss-120b"],

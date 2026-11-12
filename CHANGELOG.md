@@ -4,6 +4,36 @@ The npm package is a port of the Python package [`llmf`](https://pypi.org/projec
 changelog step by step: each version here adds the same feature as the Python release with the same number.
 Where the JavaScript line differs, the entry says so.
 
+## 0.7.4
+Security review (attack probes against the server, the HTTP client and the CLI). Fixed:
+- A redirect to another origin forwarded custom credential headers (`X-Api-Key`, `Cookie`, `Proxy-Authorization`, ...); now only
+  `Accept`, `Accept-Language`, `Accept-Encoding`, `Content-Type` and `User-Agent` are kept. Redirects from https to http, from a
+  public host to a loopback / private / link-local address, and to non-http(s) URLs are refused.
+- A stream that never sent data but kept sending keep-alive comments was not cut by the request timeout; an idle watchdog
+  (reset only by real data lines) now ends it with a timeout error.
+- Terminal escape sequences in answers (title, clear screen, OSC 52 clipboard) are stripped before the CLI prints them (`--json` unchanged).
+- Proxy passwords were echoed in the message for malformed proxy URLs.
+- `--tunnel-token` is passed to `cloudflared` as `TUNNEL_TOKEN` instead of an argument; the `--log-file` is created `0600`.
+Verified, no change needed: request smuggling (CL+TE, duplicate CL), auth header variants, path tricks on protected routes, static
+traversal (30+ encodings), session token tampering / IP binding / replay, aborted and half-sent requests, bounded memory of every
+rate-limit / ban / antibot table, gzip bomb (200 MB), huge bodies and endless lines, regex blow-up on 1 MB adversarial inputs.
+
+## 0.7.3
+Checked against the Python 0.7.6 server with the same ~230 requests (local, `--public`, `--ui`, proof of work, CORS, allow/deny IP,
+trusted proxy headers, static files, rate limits, bans, caps, parameters forwarded upstream): same status codes, error codes and
+response shapes. Where they differed, the npm server now matches:
+- A foreign `Host` (DNS rebinding) or a cross-site `Origin` on API / session routes answers `403` with code `forbidden`
+  (`forbidden host` / `cross-origin request not allowed`), as in Python. `/health` is not guarded. The accepted hosts are `localhost`,
+  `127.0.0.1`, `::1` and the bind address.
+Known, intended differences: unsupported methods (`PUT`, `DELETE`, `PATCH`, ...) answer `405` with an `Allow` header (Python: `404`, or `200` on `/`);
+`null` as a JSON body answers `400` (Python resets the connection).
+
+## 0.7.2
+- Fixed: error replies to malformed requests carried a wrong `Content-Length`; they now get a correct small JSON body. `TRACE` / `CONNECT`
+  answer `405`, oversized or too many headers answer `431` (at most 100 headers), bad request lines / HTTP versions `400`.
+- Fixed: a provider answering with a JSON object as `content` now yields that JSON as text instead of `[object Object]`.
+- Added `README.md`, `README.vi.md` and `index.d.ts` (TypeScript declarations).
+
 ## 0.7.1
 - `llmf-js -h` now renders like the Python CLI on Python 3.14: same layout (`-m, --model MODEL`, `-h` first, help column 24,
   wrapped to the terminal width, the custom `usage:` block) and the same colours (blue headings, magenta usage, green short

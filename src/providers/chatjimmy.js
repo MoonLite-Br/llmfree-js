@@ -1,19 +1,17 @@
-// Adapter for chatjimmy.ai (raw text + ``<|stats|>{json}<|/stats|>`` trailer).
 import { StringDecoder } from "node:string_decoder";
 import { openUrl, decodeBody, MAX_BODY, MAX_STREAM_SECONDS } from "../http.js";
 import { ProviderError } from "../errors.js";
 import { Adapter, netOf, translate } from "./base.js";
 
 const STATS_OPEN = "<|stats|>";
-// Greedy first group => the *last* stats block wins, so a prompt that makes the
-// model print the sentinel cannot truncate the answer.
+
 const TRAILER = /^([\s\S]*)<\|stats\|>([\s\S]*?)<\|\/stats\|>\s*$/;
 
 export function splitStats(raw) {
   const m = TRAILER.exec(raw);
   if (!m) return [raw.trim(), null];
   let stats = null;
-  try { stats = JSON.parse(m[2]); } catch { /* not json */ }
+  try { stats = JSON.parse(m[2]); } catch {   }
   return [m[1].trim(), stats && typeof stats === "object" && !Array.isArray(stats) ? stats : null];
 }
 
@@ -24,7 +22,6 @@ function usageOf(stats) {
   return { prompt_tokens: p, completion_tokens: c, total_tokens: stats.total_tokens || (p || 0) + (c || 0) };
 }
 
-/** ChatJimmy takes plain-text content only; flatten content parts. */
 function plain(message) {
   let content = message.content;
   if (Array.isArray(content)) content = content.map((p) => (p && typeof p === "object" ? p.text ?? "" : "")).join("");
@@ -53,8 +50,8 @@ export class ChatJimmyAdapter extends Adapter {
     const [url, headers, data] = this._request(spec, model, messages, opts, true);
     const resp = await translate(spec, model, () => openUrl(url, { headers, data, timeout, ...netOf(opts) }));
     const decoder = new StringDecoder("utf8");
-    let buf = ""; // not-yet-emitted text
-    let holding = false; // a stats sentinel was seen; everything after is held
+    let buf = "";
+    let holding = false;
     let started = false;
     const keep = STATS_OPEN.length - 1;
     const deadline = Date.now() + MAX_STREAM_SECONDS * 1000;
@@ -83,7 +80,7 @@ export class ChatJimmyAdapter extends Adapter {
     } finally {
       resp.close();
     }
-    // Stream finished: ``buf`` is a stats trailer, plain tail text, or (rarely) a fake sentinel followed by the real trailer.
+
     let text = holding ? splitStats(buf)[0] : buf;
     if (holding && !TRAILER.test(buf)) text = buf;
     const tail = started ? text : text.trimStart();

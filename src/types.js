@@ -1,7 +1,5 @@
-// Public value types.
 import { randomHex } from "./util.js";
 
-/** The answer text, plus metadata. ``String(reply)`` / template strings give the text. */
 export class Reply {
   constructor(text = "", { provider = "", model = "", reasoning = null, usage = null, finishReason = null,
     toolCalls = null, latency = 0, raw = null, attempts = [] } = {}) {
@@ -17,7 +15,6 @@ export class Reply {
     this.attempts = attempts;
   }
 
-  /** ``"provider/model"`` that produced this reply. */
   get source() {
     return `${this.provider}/${this.model}`;
   }
@@ -31,7 +28,7 @@ export class Reply {
   }
 
   toJSON() {
-    const { raw, attempts, ...rest } = this; // eslint-disable-line no-unused-vars
+    const { raw, attempts, ...rest } = this;
     return { ...rest, source: this.source };
   }
 }
@@ -41,7 +38,6 @@ export class ModelInfo {
     Object.assign(this, { provider, id, tags, vision, verified, alive, samples, streaming });
   }
 
-  /** Fully-qualified name usable as ``model``. */
   get name() {
     return `${this.provider}/${this.id}`;
   }
@@ -63,13 +59,12 @@ function usageOf(u) {
   return { prompt_tokens: p, completion_tokens: c, total_tokens: Number(u?.total_tokens) || p + c };
 }
 
-/** Drop-in shape of OpenAI's ``chat.completion`` plus llmf routing info. */
 export class ChatCompletion {
   constructor({ id, created, model, choices, usage, provider = "", latency = 0, attempts = [] }) {
     this.id = id;
     this.object = "chat.completion";
     this.created = created;
-    this.model = model; // "provider/model" that actually answered
+    this.model = model;
     this.choices = choices;
     this.usage = usage;
     this.provider = provider;
@@ -101,7 +96,6 @@ export class ChatCompletion {
     return this.outputText;
   }
 
-  /** The OpenAI wire shape (also what ``JSON.stringify`` gives). */
   toJSON() {
     const { id, object, created, model, choices, usage } = this;
     return { id, object, created, model, choices, usage };

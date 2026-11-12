@@ -1,9 +1,6 @@
-// Split <think>...</think> reasoning out of a (possibly streamed) text.
-
 const OPEN = "<think>";
 const CLOSE = "</think>";
 
-/** Length of the longest proper prefix of ``token`` that ``s`` ends with. */
 function partialSuffix(s, token) {
   for (let k = Math.min(token.length - 1, s.length); k > 0; k--) {
     if (s.endsWith(token.slice(0, k))) return k;
@@ -11,12 +8,11 @@ function partialSuffix(s, token) {
   return 0;
 }
 
-/** Incremental splitter: ``feed()`` returns the visible text for a chunk. */
 export class ThinkSplitter {
   constructor() {
     this.buf = "";
     this.inside = false;
-    this.started = false; // visible text has begun (for leading-space trim)
+    this.started = false;
     this.thought = [];
   }
 
@@ -75,9 +71,8 @@ export class ThinkSplitter {
   }
 }
 
-/** Non-streaming helper -> ``[visibleText, reasoningOrNull]``. */
 export function splitThink(text) {
-  // Some templates only emit the closing tag (the opening one is in the prompt).
+
   if (text.includes(CLOSE) && !text.includes(OPEN)) {
     const i = text.indexOf(CLOSE);
     return [text.slice(i + CLOSE.length).trim(), text.slice(0, i).trim() || null];

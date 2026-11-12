@@ -1,8 +1,3 @@
-// llmf (llmfree) - free, keyless LLMs behind one call, with automatic fallback.
-//
-//   import llmf, { LLMF } from "llmf";
-//   console.log(String(await llmf.chat("Xin chào")));      // a Reply: text + provider/model/reasoning
-//   const llm = new LLMF({ timeout: 30 });
 import * as tools from "./tools.js";
 import { ChatStream, Client, Session, Stream } from "./client.js";
 import { AllProvidersFailed, LLMFError, ModelNotFound, ProviderError } from "./errors.js";
@@ -13,7 +8,6 @@ export const LLMF = Client;
 
 let shared = null;
 
-/** The shared client behind the module-level helpers. */
 export function defaultClient() {
   if (!shared) {
     const env = process.env;

@@ -1,4 +1,3 @@
-// Provider specs and adapters.
 import { OpenAIAdapter } from "./openai.js";
 import { ChatJimmyAdapter } from "./chatjimmy.js";
 import { ChatAIAdapter } from "./chatai.js";

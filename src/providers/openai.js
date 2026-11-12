@@ -1,4 +1,3 @@
-// Adapter for OpenAI-compatible ``/chat/completions`` endpoints.
 import { openUrl, decodeBody, iterLines } from "../http.js";
 import { ThinkSplitter, splitThink } from "../think.js";
 import { ProviderError } from "../errors.js";
@@ -8,11 +7,11 @@ export function contentToText(content) {
   if (content === null || content === undefined) return "";
   if (typeof content === "string") return content;
   if (Array.isArray(content)) return content.map((p) => (p && typeof p === "object" ? p.text ?? "" : "")).join("");
-  return String(content);
+  return typeof content === "object" ? JSON.stringify(content) : String(content);
 }
 
 export class OpenAIAdapter extends Adapter {
-  /** Single place where requests are sent (subclasses may add session handling). */
+
   _open(spec, url, headers, data, timeout, opts) {
     return openUrl(url, { headers, data, timeout, ...netOf(opts) });
   }
@@ -46,7 +45,7 @@ export class OpenAIAdapter extends Adapter {
 
   _parse(spec, model, obj) {
     if (obj === null || typeof obj !== "object" || Array.isArray(obj)) throw new TypeError("response is not a JSON object");
-    // Some gateways report failures with HTTP 200 and an ``error`` body.
+
     if (obj.error || (obj.code && !obj.choices)) {
       const [code, msg] = errorFromBody(JSON.stringify(obj));
       throw new ProviderError(spec.name, model, msg || "error response", { code, status: code === "FREE_MODEL_FAILED" ? 502 : 400 });
@@ -72,7 +71,7 @@ export class OpenAIAdapter extends Adapter {
     const resp = await translate(spec, model, () => this._open(spec, url, headers, data, timeout, opts));
     try {
       const splitter = new ThinkSplitter();
-      const lines = guarded(spec, model, iterLines(resp));
+      const lines = guarded(spec, model, iterLines(resp, { idleSeconds: timeout }));
       let first = null;
       for (;;) {
         const r = await lines.next();
@@ -82,7 +81,7 @@ export class OpenAIAdapter extends Adapter {
       }
       if (first === null) return;
       if (!/^(data:|:|event:|id:|retry:)/.test(first)) {
-        // Provider ignored ``stream`` and sent one JSON document.
+
         let rest = first;
         for await (const l of lines) rest += l;
         const comp = await translate(spec, model, () => this._parse(spec, model, JSON.parse(rest)));

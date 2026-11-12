@@ -1,7 +1,3 @@
-// Optional discovery of live endpoints via the community "stillworks" API.
-//
-// Best effort: the response shape is parsed tolerantly. Discovered endpoints are third-party
-// servers you did not choose - use only for non-sensitive prompts.
 import { openUrl, decodeBody, DEFAULT_UA } from "./http.js";
 import { model, provider } from "./providers/base.js";
 import { isPublicHost } from "./util.js";
@@ -33,7 +29,7 @@ export async function fetchSpecs({ timeout = 20, userAgent = DEFAULT_UA, url = S
     if (!/^https?:\/\//i.test(full)) continue;
     let parsed;
     try { parsed = new URL(full); } catch { continue; }
-    // A stranger's listing must not be able to aim llmf at your own machine or network.
+
     if (parsed.username || parsed.password || !isPublicHost(parsed.hostname)) continue;
     if (!/^[\w.:/@+-]{1,100}$/.test(String(mid))) continue;
     const key = `${full}\n${mid}`;

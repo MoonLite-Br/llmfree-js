@@ -1,8 +1,3 @@
-// Optional single-purpose tools (not general chat providers).
-//
-// ``askLangchainDocs`` talks to the public "Chat LangChain" docs agent. It only answers LangChain /
-// LangGraph / LangSmith / Deep Agents questions and refuses everything else, so it is deliberately
-// *not* part of the ``chat`` chain.
 import { DEFAULT_UA, HTTPFailure, checkProxy, decodeBody, openUrl } from "./http.js";
 import { ProviderError } from "./errors.js";
 import { Reply } from "./types.js";
@@ -11,9 +6,8 @@ import { now } from "./util.js";
 export const LANGCHAIN_BACKEND = "https://chat-langchain-external-707c6e45e5075e168a6835a7d23a9934.us.langgraph.app";
 const TOKEN_TTL = 23 * 3600 * 1000;
 const NAME = "langchain-docs";
-const tokens = new Map(); // "backend|proxy" -> { token, born }
+const tokens = new Map();
 
-/** A :class:`Reply` that also says whether the agent refused as off-topic. */
 export class DocsReply extends Reply {
   offTopic = false;
 }
@@ -50,11 +44,6 @@ function finalText(obj) {
   return "";
 }
 
-/**
- * Ask the LangChain docs agent. Resolves to a :class:`DocsReply` (``.offTopic`` flag).
- * Limits: ~10 requests/minute/IP and 5-15 s latency. The backend URL can change when LangChain
- * redeploys - pass ``backend`` if so.
- */
 export async function askLangchainDocs(question, { backend = LANGCHAIN_BACKEND, timeout = 60, proxy = null, transport = "node", impersonate = "chrome", userAgent = DEFAULT_UA } = {}) {
   const net = { proxy, transport, impersonate };
   backend = backend.replace(/\/+$/, "");
@@ -71,7 +60,7 @@ export async function askLangchainDocs(question, { backend = LANGCHAIN_BACKEND, 
         { assistant_id: "docs-agent", input: { messages: [{ role: "user", content: question }] } }, timeout, net, userAgent);
       break;
     } catch (e) {
-      if (attempt === 0 && e instanceof ProviderError && [401, 403].includes(e.status)) continue; // expired guest token -> refresh once
+      if (attempt === 0 && e instanceof ProviderError && [401, 403].includes(e.status)) continue;
       throw e;
     }
   }

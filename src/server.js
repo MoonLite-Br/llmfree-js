@@ -1,10 +1,3 @@
-// ``llmf serve``: OpenAI-compatible server (node:http only, no dependencies).
-//
-// Local by default (127.0.0.1, no auth, no limits). ``public: true`` (``--public``, ``--cloudflare``) switches on the
-// hardening profile: mandatory API key, per-key / per-IP rate limits, ban after repeated auth failures, body and
-// ``max_tokens`` caps, security headers, generic error messages and the anti-bot check for web pages.
-// Optional web features: ``ui`` (built-in chat page), ``web`` (one HTML file or a static directory) and ``appPort``
-// (reverse proxy to your own web app, see ``serve({ app: "node main.js" })``).
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
@@ -16,12 +9,11 @@ import { randomHex } from "./util.js";
 import { AppProcess, StaticSite, asset, contentType, proxyRequest } from "./web.js";
 import { Tunnel, TunnelError } from "./tunnel.js";
 
-const MAX_BODY = 20 * 1024 * 1024; // base64 images can be large
+const MAX_BODY = 20 * 1024 * 1024;
 const APP_MAX_BODY = 25 * 1024 * 1024;
 const ALIASES = ["auto", "fast", "best", "code", "vision", "reasoning"];
 const PARAMS = ["max_tokens", "max_completion_tokens", "temperature", "top_p", "stop", "tools", "response_format"];
 const LOOPBACK = /^(localhost|127(\.\d+){3}|::1)$/i;
-const hostOf = (h) => { try { return new URL("http://" + h).hostname.replace(/^\[|\]$/g, ""); } catch { return null; } };
 
 export class ConfigError extends TypeError {}
 
@@ -39,7 +31,6 @@ const PUBLIC = { maxConcurrent: 32, rate: 120, ipRate: 240, maxBody: 1024 * 1024
 const err = (message, type, code = null) => ({ error: { message, type, code } });
 const flag = (k) => "--" + k.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
 
-/** Map OpenAI request fields onto llmf call options. */
 function callOptions(body) {
   const o = {};
   if (body.max_tokens != null) o.maxTokens = body.max_tokens;
@@ -92,13 +83,13 @@ function resolveConfig(client, opts) {
   cfg.logFd = null;
   if (o.logFile) {
     if (o.logFile === "-") cfg.logFd = 2;
-    else { try { cfg.logFd = fs.openSync(o.logFile, "a"); } catch (e) { throw new ConfigError(`cannot open the log file ${o.logFile}: ${e.message}`); } }
+    else { try { cfg.logFd = fs.openSync(o.logFile, "a", 0o600); } catch (e) { throw new ConfigError(`cannot open the log file ${o.logFile}: ${e.message}`); } }
   }
   cfg.log = (entry) => {
     if (cfg.logFd === null) return;
-    try { fs.writeSync(cfg.logFd, JSON.stringify({ ...entry, t: new Date().toISOString() }) + "\n"); } catch { /* logging is best effort */ }
+    try { fs.writeSync(cfg.logFd, JSON.stringify({ ...entry, t: new Date().toISOString() }) + "\n"); } catch {   }
   };
-  cfg.close = () => { if (cfg.logFd !== null && cfg.logFd > 2) { try { fs.closeSync(cfg.logFd); } catch { /* gone */ } cfg.logFd = null; } };
+  cfg.close = () => { if (cfg.logFd !== null && cfg.logFd > 2) { try { fs.closeSync(cfg.logFd); } catch {   } cfg.logFd = null; } };
   return cfg;
 }
 
@@ -106,8 +97,8 @@ export function createServer(client, opts = {}) {
   const cfg = resolveConfig(client, opts);
   const bindHost = cfg.bindHost;
   cfg.loopbackOnly = !cfg.public && !cfg.trustProxy && !!bindHost && LOOPBACK.test(bindHost);
-  cfg.hosts = new Set(["localhost", "127.0.0.1", "::1", String(bindHost || "").toLowerCase()]);
-  let active = 0; // chat requests being served right now
+  cfg.hosts = new Set(["localhost", "127.0.0.1", "[::1]", "::1", String(bindHost || "").toLowerCase()]);
+  let active = 0;
 
   const send = (res, code, obj, extra = {}) => {
     const data = Buffer.from(JSON.stringify(obj));
@@ -138,7 +129,6 @@ export function createServer(client, opts = {}) {
     if (cfg.csp) res.setHeader("Content-Security-Policy", cfg.csp);
   }
 
-  // ------------------------------------------------------------ identity
   const peerIp = (req) => sec.normIp(req.socket.remoteAddress || "") || req.socket.remoteAddress || "?";
   function clientIp(req) {
     const peer = peerIp(req);
@@ -146,7 +136,7 @@ export function createServer(client, opts = {}) {
       const cf = sec.normIp(String(req.headers["cf-connecting-ip"] || ""));
       if (cf) return cf;
       const xff = String(req.headers["x-forwarded-for"] || "");
-      if (xff) { const last = sec.normIp(xff.split(",").at(-1)); if (last) return last; } // the hop our trusted proxy saw
+      if (xff) { const last = sec.normIp(xff.split(",").at(-1)); if (last) return last; }
     }
     return peer;
   }
@@ -167,7 +157,7 @@ export function createServer(client, opts = {}) {
     const tok = bearer(req);
     if (tok) {
       let found = null;
-      for (const k of cfg.apiKeys) if (eq(tok, k)) found = k; // no early exit: constant work per request
+      for (const k of cfg.apiKeys) if (eq(tok, k)) found = k;
       if (found !== null) return ["key", cfg.kid.get(found)];
       if (cfg.antibot && cfg.antibot.validToken(tok, ip)) return ["session", ip];
     }
@@ -179,21 +169,19 @@ export function createServer(client, opts = {}) {
     if (banned) cfg.log({ event: "ban", ip });
   }
 
-  /** API / session routes: refuse DNS rebinding (foreign Host on a loopback server) and cross-site browser requests. */
   function guard(req, res) {
-    const host = hostOf(req.headers.host || "");
-    if (cfg.loopbackOnly && !(host && LOOPBACK.test(host))) { send(res, 421, err("unexpected Host header", "invalid_request_error", "bad_host")); return false; }
-    const origin = req.headers.origin;
-    if (origin !== undefined) {
-      const o = String(origin).replace(/\/+$/, "");
-      let same = false;
-      try { same = new URL(o).host.toLowerCase() === String(req.headers.host || "").toLowerCase(); } catch { /* not a URL */ }
-      if (!cfg.cors && !cfg.corsOrigins.includes(o) && !same) { send(res, 403, err("cross-site request refused (use --cors / --cors-origin to allow it)", "invalid_request_error", "bad_origin")); return false; }
+    const hostRaw = String(req.headers.host || "").toLowerCase();
+    if (cfg.loopbackOnly && hostRaw) {
+      const name = hostRaw.endsWith("]") ? hostRaw : hostRaw.replace(/:\d*$/, "");
+      if (!cfg.hosts.has(name)) { send(res, 403, err("forbidden host", "invalid_request_error", "forbidden")); return false; }
+    }
+    const origin = String(req.headers.origin || "").replace(/\/+$/, "").toLowerCase();
+    if (origin && !cfg.cors && !cfg.corsOrigins.some((o) => o.toLowerCase() === origin)) {
+      if (origin.split("://").at(-1) !== hostRaw) { send(res, 403, err("cross-origin request not allowed", "invalid_request_error", "forbidden")); return false; }
     }
     return true;
   }
 
-  // ------------------------------------------------------------ body
   function readBody(req, res, limit) {
     return new Promise((resolve) => {
       if (/chunked/i.test(String(req.headers["transfer-encoding"] || ""))) { send(res, 411, err("Content-Length required", "invalid_request_error")); return resolve(null); }
@@ -218,7 +206,6 @@ export function createServer(client, opts = {}) {
     } catch (e) { send(res, 400, err(`bad request: ${e.message}`, "invalid_request_error")); return null; }
   }
 
-  // ------------------------------------------------------------ /_llmf/*
   async function internal(req, res, path, ip) {
     const ro = req.method === "GET" || req.method === "HEAD";
     if ((path === "/_llmf/client.js" || path === "/_llmf/ui.js") && ro && cfg.sessions) return bytes(res, asset(path.split("/").pop()), "text/javascript; charset=utf-8");
@@ -248,11 +235,10 @@ export function createServer(client, opts = {}) {
     return send(res, 404, err("not found", "invalid_request_error", "not_found"));
   }
 
-  // ------------------------------------------------------------ /v1
   const pickModel = (requested) => {
     if (typeof requested !== "string" || ["", "auto", "default"].includes(requested.trim().toLowerCase())) return null;
     try { client._reg.resolve(requested); return requested; } catch (e) {
-      if (e instanceof ModelNotFound) { if (cfg.strictModels) throw e; return null; } // unknown name from a client app (e.g. "gpt-4o") -> automatic
+      if (e instanceof ModelNotFound) { if (cfg.strictModels) throw e; return null; }
       throw e;
     }
   };
@@ -345,7 +331,7 @@ export function createServer(client, opts = {}) {
     const it = st[Symbol.asyncIterator]();
     let closed = false;
     res.once("close", () => { closed = true; it.return?.().catch?.(() => {}); });
-    const first = await it.next(); // fallback between providers happens here, before any bytes
+    const first = await it.next();
     const id = "chatcmpl-" + randomHex(12), created = Math.floor(Date.now() / 1000), model = `${st.provider}/${st.model}`;
     res.llmfModel = model;
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", "X-Accel-Buffering": "no" });
@@ -362,7 +348,6 @@ export function createServer(client, opts = {}) {
     if (!closed) { res.write("data: [DONE]\n\n"); res.end(); }
   }
 
-  // ------------------------------------------------------------ web: ui / files / app
   function uiCsp() {
     const ts = cfg.antibot?.mode === "turnstile";
     const cf = " https://challenges.cloudflare.com";
@@ -401,7 +386,6 @@ export function createServer(client, opts = {}) {
     return send(res, 404, err("not found", "invalid_request_error", "not_found"));
   }
 
-  // ------------------------------------------------------------ entry
   async function dispatch(req, res, ip) {
     if ((cfg.deny.length && sec.ipIn(ip, cfg.deny)) || (cfg.allow.length && !sec.ipIn(ip, cfg.allow))) return send(res, 403, err("forbidden", "invalid_request_error", "forbidden"));
     const left = cfg.bans.banned(ip);
@@ -417,6 +401,7 @@ export function createServer(client, opts = {}) {
     }
     const webOnly = path !== "/health" && !path.startsWith("/_llmf/") && path !== "/v1" && !path.startsWith("/v1/");
     const hasSite = !!(cfg.static || cfg.appPort !== null || cfg.ui);
+    if (path === "/health") return send(res, 200, { status: "ok", service: "llmf" });
     if (!(webOnly && hasSite) && !guard(req, res)) return undefined;
     if (path === "/health") return send(res, 200, { status: "ok", service: "llmf" });
     if (path.startsWith("/_llmf/")) return internal(req, res, path, ip);
@@ -424,7 +409,7 @@ export function createServer(client, opts = {}) {
     if (!hasSite) {
       if (path === "/" || path === "") return send(res, 200, { status: "ok", service: "llmf" });
       const legacy = path.replace(/\/+$/, "");
-      if (legacy === "/models" || legacy === "/chat/completions") return api(req, res, legacy, ip); // legacy un-prefixed form
+      if (legacy === "/models" || legacy === "/chat/completions") return api(req, res, legacy, ip);
       return send(res, 404, err(`not found: ${path}`, "invalid_request_error", "not_found"));
     }
     return site(req, res, path, ip);
@@ -438,8 +423,9 @@ export function createServer(client, opts = {}) {
     try {
       ip = clientIp(req);
       applyHeaders(req, res);
+      if (!["GET", "HEAD", "POST", "OPTIONS"].includes(req.method)) return send(res, 405, err("method not allowed", "invalid_request_error", "method_not_allowed"), { Allow: "GET, HEAD, POST, OPTIONS" });
       await dispatch(req, res, ip);
-    } catch (e) { // never leak internals to the client
+    } catch (e) {
       cfg.log({ event: "error", ip, error: `${e?.name}: ${e?.message}` });
       if (!res.headersSent) send(res, 500, err("internal error", "server_error"));
       else res.destroy();
@@ -451,27 +437,32 @@ export function createServer(client, opts = {}) {
     let cert, key;
     try { cert = fs.readFileSync(cfg.tlsCert); key = fs.readFileSync(cfg.tlsKey || cfg.tlsCert); } catch (e) { throw new ConfigError(`cannot load the TLS certificate/key (${cfg.tlsCert}): ${e.message}`); }
     try { server = https.createServer({ cert, key, minVersion: "TLSv1.2" }, handler); } catch (e) { throw new ConfigError(`cannot load the TLS certificate/key (${cfg.tlsCert}): ${e.message}`); }
-    server.on("tlsClientError", () => {}); // probes / resets are noise
+    server.on("tlsClientError", () => {});
   } else server = http.createServer(handler);
-  server.on("clientError", (e, sock) => { try { sock.end("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 62\r\n\r\n" + JSON.stringify(err("Bad Request", "invalid_request_error", "bad_request"))); } catch { sock.destroy(); } });
+  const rawError = (status, text, code) => {
+    const body = JSON.stringify(err(text, "invalid_request_error", code));
+    return `HTTP/1.1 ${status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
+  };
+
+  server.on("clientError", (e, sock) => {
+    if (!sock.writable) return sock.destroy();
+    const big = e?.code === "HPE_HEADER_OVERFLOW";
+    try { sock.end(rawError(big ? "431 Request Header Fields Too Large" : "400 Bad Request", big ? "request headers too large" : "Bad Request", big ? "headers_too_large" : "bad_request")); } catch { sock.destroy(); }
+  });
+  server.on("connect", (req, sock) => { try { sock.end(rawError("405 Method Not Allowed", "method not allowed", "method_not_allowed")); } catch { sock.destroy(); } });
+  server.maxHeadersCount = 100;
   server.llmf = cfg;
   server.keepAliveTimeout = 5000;
-  server.headersTimeout = 30000; // a client that never finishes its request cannot hold a socket forever
+  server.headersTimeout = 30000;
   server.requestTimeout = 60000;
   if (cfg.public) server.maxConnections = Number(cfg.maxConnections || 256);
   else if (cfg.maxConnections) server.maxConnections = Number(cfg.maxConnections);
   return server;
 }
 
-
-/**
- * Start listening; resolves with the ``http.Server`` once it is up (option errors throw synchronously).
- * Extra options: ``cloudflare`` / ``tunnelToken`` (need ``cloudflared``; imply ``public``), ``app`` (a command to run
- * and proxy to), ``appDir``. ``server.llmf.publicUrl`` holds the tunnel URL; closing the server stops child and tunnel.
- */
 export function serve(client, { host, port = 8000, cloudflare = false, tunnelToken = null, app = null, appDir = null, log = (s) => console.error(s), ...opts } = {}) {
   const tunnelled = !!(cloudflare || tunnelToken);
-  if (tunnelled) { opts.public = true; opts.trustProxy = true; } // reachable from the internet: use the hardening profile, cloudflared connects from loopback
+  if (tunnelled) { opts.public = true; opts.trustProxy = true; }
   if (app && !opts.appPort) opts.appPort = 3000;
   if (!Number.isInteger(Number(port)) || port < 0 || port > 65535) throw new ConfigError("--port must be between 0 and 65535");
   const bind = host ?? (opts.public && !tunnelled ? "0.0.0.0" : "127.0.0.1");

@@ -1,4 +1,3 @@
-// Command line: ``llmf "your question"``.
 import { parseArgs } from "node:util";
 import fs from "node:fs";
 import readline from "node:readline";
@@ -18,7 +17,6 @@ const HELP = `usage: llmf-js [options] "question"            ask once (also read
                                             OpenAI-compatible server
 `;
 
-// One table drives parsing, validation and --help (same flags and wording as the Python CLI).
 const SPECS = [
   { name: "model", short: "m", help: "model, alias (fast/best/code/vision/reasoning) or provider/model" },
   { name: "provider", short: "p", help: "provider name (see `llmf-js providers`); combine with -m" },
@@ -88,7 +86,6 @@ for (const sp of SPECS) {
 
 const metavar = (sp) => sp.metavar || (sp.choices ? `{${sp.choices.join(",")}}` : sp.name.toUpperCase().replace(/-/g, "_"));
 
-// Same rules as Python 3.14's argparse: colour only on a terminal, never with NO_COLOR / TERM=dumb, FORCE_COLOR forces it.
 function useColor(stream = process.stdout) {
   const e = process.env;
   if (e.NO_COLOR) return false;
@@ -99,7 +96,6 @@ function useColor(stream = process.stdout) {
 const ANSI = { reset: "\x1b[0m", heading: "\x1b[1;34m", usage: "\x1b[35m", short: "\x1b[1;32m", long: "\x1b[1;36m", label: "\x1b[1;33m", action: "\x1b[1;32m", prog: "\x1b[1;35m", error: "\x1b[1;31m" };
 const paint = (on, kind, text) => (on ? `${ANSI[kind]}${text}${ANSI.reset}` : text);
 
-/** argparse prints ``usage: `` + the custom usage text, which itself starts with ``usage:`` (same as the Python CLI). */
 function usageBlock(color) {
   return `${paint(color, "heading", "usage:")} ${paint(color, "usage", HELP.trimEnd().replace(/\n/g, "\n"))}`;
 }
@@ -128,7 +124,6 @@ function fullHelp(color = useColor()) {
   return lines.join("\n");
 }
 
-/** argparse-style failure: usage + ``llmf-js: error: ...`` on stderr, exit status 2. */
 function argError(msg) {
   const color = useColor(process.stderr);
   console.error(usageBlock(color));
@@ -136,7 +131,6 @@ function argError(msg) {
   return 2;
 }
 
-/** Turn parseArgs output into typed values (ints, floats, choices) like argparse would. Returns ``[values, error]``. */
 function typed(values) {
   const out = {};
   for (const sp of SPECS) {
@@ -158,6 +152,8 @@ function table(rows, header) {
   for (const r of all) console.log(r.map((c, i) => String(c).padEnd(w[i])).join("  ").trimEnd());
 }
 
+const safe = (s) => String(s ?? "").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+
 async function ask(a, prompt, history = []) {
   const c = defaultClient();
   const o = { model: a.model, provider: a.provider, system: a.system, maxTokens: a["max-tokens"], temperature: a.temperature };
@@ -168,7 +164,7 @@ async function ask(a, prompt, history = []) {
   let text, src;
   if (a.stream && !a.json) {
     const st = c.stream(msgs, o);
-    for await (const piece of st) process.stdout.write(piece);
+    for await (const piece of st) process.stdout.write(safe(piece));
     process.stdout.write("\n");
     text = st.reply ? st.reply.text : st.text;
     src = st.reply ? st.reply.source : "";
@@ -177,7 +173,7 @@ async function ask(a, prompt, history = []) {
     text = r.text;
     src = r.source;
     if (a.json) console.log(JSON.stringify({ text, provider: r.provider, model: r.model, reasoning: r.reasoning, usage: r.usage, latency: Math.round(r.latency * 1000) / 1000 }));
-    else console.log(text);
+    else console.log(safe(text));
   }
   if (a.verbose && src) console.error(`[${src}]`);
   return text;
@@ -187,7 +183,7 @@ async function doctor(a, c) {
   let ok = 0, bad = 0;
   const show = (r) => {
     if (r.ok) ok++; else bad++;
-    if (!a.json) console.log(`${r.ok ? "OK" : "FAIL"}`.padEnd(5), r.name.padEnd(58), `${r.latency.toFixed(2)}s`.padStart(7), " ", (r.ok ? r.answer : r.error) || "");
+    if (!a.json) console.log(`${r.ok ? "OK" : "FAIL"}`.padEnd(5), r.name.padEnd(58), `${r.latency.toFixed(2)}s`.padStart(7), " ", safe(r.ok ? r.answer : r.error));
   };
   if (!a.json) console.error("Testing every model once (providers in parallel)...");
   const results = await c.models.check({ providers: a.provider ? [a.provider] : null, includeLive: a.all, includeNonChat: a["include-non-chat"], includeLimited: a["include-limited"],

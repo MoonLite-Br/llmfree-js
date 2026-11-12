@@ -1,11 +1,9 @@
-// On-disk health/latency cache written by ``llmf doctor`` and read by the Client.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const MAX_AGE = 24 * 3600; // seconds
+export const MAX_AGE = 24 * 3600;
 
-/** Directory for cache files, or ``null`` when caching is disabled (``LLMF_NO_CACHE=1``). */
 export function cacheDir() {
   if (process.env.LLMF_NO_CACHE) return null;
   if (process.env.LLMF_CACHE_DIR) return process.env.LLMF_CACHE_DIR;
@@ -20,7 +18,6 @@ function writeAtomic(dir, name, data) {
   fs.renameSync(tmp, path.join(dir, name));
 }
 
-/** Recent results (``provider``, ``model``, ``ok``, ``latency``) or ``[]``. */
 export function load(dir) {
   if (!dir) return [];
   try {
@@ -32,7 +29,6 @@ export function load(dir) {
   }
 }
 
-/** Atomically write results; returns the file path (or ``null`` if it cannot). */
 export function save(dir, results) {
   if (!dir) return null;
   try {
@@ -43,12 +39,10 @@ export function save(dir, results) {
   }
 }
 
-// ---------------------------------------------------------------- survival history
-export const HISTORY_WINDOW = 20; // keep the last N doctor results per model
-export const MIN_SAMPLES = 3; // a model needs this many samples before its rate demotes it
-export const MIN_RATE = 0.5; // ... and a success rate below this demotes it
+export const HISTORY_WINDOW = 20;
+export const MIN_SAMPLES = 3;
+export const MIN_RATE = 0.5;
 
-/** ``{"provider/model": "1101..."}`` (newest last; ``1`` = answered, ``0`` = failed). */
 export function loadHistory(dir) {
   if (!dir) return {};
   try {
@@ -61,7 +55,6 @@ export function loadHistory(dir) {
   }
 }
 
-/** Append one doctor result per model to the survival history. */
 export function record(dir, rows) {
   if (!dir || !rows.length) return;
   const hist = loadHistory(dir);
@@ -72,23 +65,19 @@ export function record(dir, rows) {
   }
   try {
     writeAtomic(dir, "history.json", JSON.stringify(Object.fromEntries(Object.entries(hist).sort())));
-  } catch { /* read-only cache dir: history is a nicety */ }
+  } catch {   }
 }
 
-/** Success rate 0..1 of a history string, or ``null`` when there is none. */
 export function rate(history) {
   return history ? [...history].filter((c) => c === "1").length / history.length : null;
 }
 
-/** Enough samples and a low success rate. */
 export function unreliable(history) {
   return history.length >= MIN_SAMPLES && rate(history) < MIN_RATE;
 }
 
-// --- pacing across processes: ``llmf ask`` twice in a row must still respect a provider's minimum gap
-export const PACE_MIN_INTERVAL = 5; // only providers with a gap this long are tracked (a file write per call otherwise)
+export const PACE_MIN_INTERVAL = 5;
 
-/** Wall-clock time (epoch seconds) of the last reserved slot for ``provider``, if recorded and sane. */
 export function paceLast(dir, provider) {
   if (!dir) return null;
   try {
@@ -99,12 +88,11 @@ export function paceLast(dir, provider) {
   }
 }
 
-/** Record the slot, never moving an existing (newer) one back. */
 export function paceSet(dir, provider, wall) {
   if (!dir) return;
   let all = {};
-  try { all = JSON.parse(fs.readFileSync(path.join(dir, "pace.json"), "utf8")) || {}; } catch { /* first write */ }
+  try { all = JSON.parse(fs.readFileSync(path.join(dir, "pace.json"), "utf8")) || {}; } catch {   }
   if (typeof all[provider] === "number" && all[provider] >= wall) return;
   all[provider] = wall;
-  try { writeAtomic(dir, "pace.json", JSON.stringify(all)); } catch { /* pacing memory is a nicety */ }
+  try { writeAtomic(dir, "pace.json", JSON.stringify(all)); } catch {   }
 }

@@ -1,9 +1,3 @@
-// Adapter for nottrack.com ``/api/dispatch`` (SSE, multi-speaker "debate" mode).
-//
-// Request: ``{"user_input": "..."}``. Response: server-sent events; the answer is the concatenation of
-// ``chunk`` fields of ``type == "delta"`` events. Replies are long, uncensored, role-play style, with
-// several speakers, so this provider is opt-in only (``provider: "nottrack"``) and never part of the
-// automatic chain.
 import { iterLines, openUrl } from "../http.js";
 import { ProviderError } from "../errors.js";
 import { Adapter, guarded, netOf, translate } from "./base.js";
@@ -13,7 +7,6 @@ const text = (content) => {
   return content == null ? "" : String(content);
 };
 
-/** The endpoint takes one string: send a lone user message as is, else a transcript. */
 export function buildInput(messages) {
   if (messages.length === 1) return text(messages[0].content);
   const names = { system: "System", user: "User", assistant: "Assistant" };
@@ -27,10 +20,9 @@ export class NotTrackAdapter extends Adapter {
     return openUrl(spec.chatUrl, { headers, data, timeout, ...netOf(opts) });
   }
 
-  /** Yield text pieces; a blank line is added when the speaker changes. */
-  async *_events(spec, model, resp) {
+  async *_events(spec, model, resp, timeout = 0) {
     let speaker;
-    for await (const raw of iterLines(resp)) {
+    for await (const raw of iterLines(resp, { idleSeconds: timeout })) {
       const line = raw.trim();
       if (!line.startsWith("data:")) continue;
       const payload = line.slice(5).trim();
@@ -50,7 +42,7 @@ export class NotTrackAdapter extends Adapter {
     const resp = await translate(spec, model, () => this._open(spec, messages, opts, timeout));
     let out = "";
     try {
-      for await (const piece of guarded(spec, model, this._events(spec, model, resp))) out += piece;
+      for await (const piece of guarded(spec, model, this._events(spec, model, resp, timeout))) out += piece;
     } finally { resp.close(); }
     out = out.trim();
     if (!out) throw new ProviderError(spec.name, model, "empty answer", { status: 200, code: "empty" });
@@ -61,7 +53,7 @@ export class NotTrackAdapter extends Adapter {
     const resp = await translate(spec, model, () => this._open(spec, messages, opts, timeout));
     try {
       let started = false;
-      for await (let piece of guarded(spec, model, this._events(spec, model, resp))) {
+      for await (let piece of guarded(spec, model, this._events(spec, model, resp, timeout))) {
         if (!started) piece = piece.trimStart();
         if (piece) { started = true; yield piece; }
       }

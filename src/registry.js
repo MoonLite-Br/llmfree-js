@@ -1,9 +1,7 @@
-// Provider registry and model-name resolution.
 import { ModelNotFound } from "./errors.js";
 import { BUILTIN, TAGS } from "./providers/builtin.js";
 import { closeMatches, similarity } from "./util.js";
 
-/** A ``provider/model`` pair, usable as a Map / Set key through ``String(t)``. */
 export class Target {
   constructor(provider, model) {
     this.provider = provider;
@@ -40,7 +38,6 @@ export class Registry {
     if (chain && spec.auto) (front ? this._front : this._extra).push(new Target(spec.name, spec.default));
   }
 
-  /** Default fallback chain: custom-front, builtin defaults in rank order, custom. */
   chain() {
     const builtin = new Set(BUILTIN.map((s) => s.name));
     const core = [...this.providers].filter(([n, s]) => builtin.has(n) && s.auto).map(([n, s]) => new Target(n, s.default));
@@ -81,7 +78,6 @@ export class Registry {
     return [...this.providers].filter(([, s]) => s.aliases.includes(h)).map(([n]) => n);
   }
 
-  /** Map a user-facing ``model`` value to an ordered list of targets. */
   resolve(model) {
     if (model === null || model === undefined) return this.chain();
     if (typeof model !== "string") return dedupe([...model].flatMap((m) => this.resolve(m)));
@@ -104,7 +100,7 @@ export class Registry {
       const spec = this.providers.get(n);
       if (!rest || ["auto", "default"].includes(rest.toLowerCase())) { out.push(new Target(n, spec.default)); continue; }
       const hits = this._fuzzy(rest, n);
-      out.push(...(hits.length ? hits : [new Target(n, rest)])); // pass unknown ids through
+      out.push(...(hits.length ? hits : [new Target(n, rest)]));
     }
     return out;
   }
@@ -123,7 +119,7 @@ export class Registry {
         else if ([...keys].some((k) => k.includes(nq))) partial.push(new Target(n, m.id));
       }
     }
-    return [...exact, ...partial]; // exact matches first, then looser ones as extra fallbacks
+    return [...exact, ...partial];
   }
 
   _notFound(q) {
@@ -131,7 +127,7 @@ export class Registry {
     const pool = [...this._tags.keys(), ...this.providers.keys(), ...ids];
     const low = q.toLowerCase();
     let close = closeMatches(low, pool, 3, 0.5);
-    for (const i of ids) { // also compare against the vendor-less tail
+    for (const i of ids) {
       const t = i.split("/").pop().replace(":free", "");
       if (!close.includes(i) && similarity(low, t.toLowerCase().slice(0, q.length + 2)) > 0.75) close.push(i);
     }

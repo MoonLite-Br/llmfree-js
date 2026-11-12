@@ -1,10 +1,3 @@
-// Security building blocks for ``llmf serve`` (node:crypto only).
-//
-// * RateLimiter - token bucket per key (IP, API key id, ...).
-// * BanList     - temporary block after repeated authentication failures.
-// * parseNetworks / ipIn - allow/deny lists in CIDR notation.
-// * Antibot     - stateless proof-of-work (or Cloudflare Turnstile) that turns a visitor into a short-lived,
-//                 IP-bound session token, so a public web chat is not open to scripts.
 import crypto from "node:crypto";
 import { isIP } from "node:net";
 import { decodeBody, openUrl } from "./http.js";
@@ -15,15 +8,13 @@ export const SESSION_PREFIX = "llmf1.";
 const mono = () => Number(process.hrtime.bigint()) / 1e9;
 const sha256 = (s) => crypto.createHash("sha256").update(s).digest();
 
-// --------------------------------------------------------------------------- helpers
-/** Short, non-reversible id for logs and rate-limit buckets (never log the key itself). */
 export const keyId = (secret) => sha256(String(secret)).toString("hex").slice(0, 8);
 export const newApiKey = () => "llmf-" + crypto.randomBytes(24).toString("base64url");
 
 function v6ToBig(ip) {
   ip = ip.split("%")[0];
   const tail = /(\d+\.\d+\.\d+\.\d+)$/.exec(ip);
-  if (tail) { // ::ffff:1.2.3.4 style
+  if (tail) {
     const p = tail[1].split(".").map(Number);
     ip = ip.slice(0, -tail[1].length) + ((p[0] << 8) | p[1]).toString(16) + ":" + ((p[2] << 8) | p[3]).toString(16);
   }
@@ -34,7 +25,6 @@ function v6ToBig(ip) {
   return groups.reduce((acc, g) => (acc << 16n) | BigInt(parseInt(g || "0", 16)), 0n);
 }
 
-/** ``{ v: 4|6, n: BigInt }`` for an address (IPv4-mapped IPv6 becomes IPv4), or ``null``. */
 export function addr(ip) {
   const s = String(ip || "").trim().split("%")[0].replace(/^\[|\]$/g, "");
   const v = isIP(s);
@@ -47,7 +37,6 @@ export function addr(ip) {
   return null;
 }
 
-/** Parse ``["10.0.0.0/8", "1.2.3.4,::1"]`` into network objects. Throws ``TypeError`` for junk. */
 export function parseNetworks(items = []) {
   const out = [];
   for (const raw of [].concat(items || [])) {
@@ -75,7 +64,7 @@ const LOCAL4 = parseNetworks(["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192
 const LOCAL6 = parseNetworks(["::1", "fc00::/7", "fe80::/10"]);
 export const isLoopback = (ip) => { const a = addr(ip); return !!a && (a.v === 4 ? ipIn(ip, LOOP4) : a.n === 1n); };
 export const isLocal = (ip) => ipIn(ip, LOCAL4) || ipIn(ip, LOCAL6);
-/** Canonical text of an address (``::ffff:1.2.3.4`` -> ``1.2.3.4``), or ``""``. */
+
 export function normIp(s) {
   const a = addr(s);
   if (!a) return "";
@@ -83,19 +72,16 @@ export function normIp(s) {
   return String(s).trim().split("%")[0].replace(/^\[|\]$/g, "").toLowerCase();
 }
 
-// ------------------------------------------------------------------------ rate limit
-/** Token bucket: ``perMin`` sustained, ``burst`` at once. ``perMin <= 0`` disables it. */
 export class RateLimiter {
   constructor(perMin, burst = null, maxKeys = 20000) {
     this.rate = Math.max(0, Number(perMin) || 0) / 60;
     this.burst = Number(burst ?? Math.max(3, Math.trunc(perMin / 4)));
     this.maxKeys = maxKeys;
-    this.b = new Map(); // key -> [tokens, lastSeen]
+    this.b = new Map();
   }
 
   get enabled() { return this.rate > 0; }
 
-  /** ``[allowed, secondsUntilItWouldBe]`` */
   allow(key, cost = 1) {
     if (this.rate <= 0) return [true, 0];
     const t = mono();
@@ -111,14 +97,13 @@ export class RateLimiter {
   _gc(t) {
     const idle = this.burst / this.rate;
     for (const [k, [, last]] of this.b) if (t - last >= idle) this.b.delete(k);
-    if (this.b.size > this.maxKeys) { // still too many distinct clients: drop the oldest half
+    if (this.b.size > this.maxKeys) {
       const old = [...this.b].sort((x, y) => x[1][1] - y[1][1]).slice(0, Math.floor(this.b.size / 2));
       for (const [k] of old) this.b.delete(k);
     }
   }
 }
 
-/** ``after`` strikes within ``window`` seconds block an IP for ``duration`` seconds. */
 export class BanList {
   constructor(after = 10, window = 600, duration = 900, maxEntries = 20000) {
     Object.assign(this, { after, window, duration, maxEntries });
@@ -128,7 +113,6 @@ export class BanList {
 
   get enabled() { return this.after > 0; }
 
-  /** Seconds left on the ban (0 if none). */
   banned(ip) {
     if (!this.enabled) return 0;
     const left = (this.until.get(ip) ?? 0) - mono();
@@ -136,7 +120,6 @@ export class BanList {
     return left;
   }
 
-  /** Record a failure; true when this one triggered a ban. */
   strike(ip) {
     if (!this.enabled) return false;
     const t = mono();
@@ -149,7 +132,6 @@ export class BanList {
   }
 }
 
-// ----------------------------------------------------------------------------- antibot
 export function leadingZeroBits(digest) {
   let n = 0;
   for (const b of digest) {
@@ -168,11 +150,6 @@ async function formPost(url, fields, timeout = 10) {
 
 export class PermissionDenied extends Error {}
 
-/**
- * Challenge -> proof -> session token, all stateless except a replay cache.
- * ``mode``: ``"pow"`` (SHA-256 leading-zero-bits puzzle, no account needed), ``"turnstile"`` (Cloudflare Turnstile
- * token, verified server-side) or ``"off"`` (sessions without a proof; rate limits still apply).
- */
 export class Antibot {
   constructor(mode = "pow", { bits = 16, sessionTtl = 1800, challengeTtl = 120, bindIp = true, secret = null, turnstileSecret = null, turnstileSitekey = null, verifyUrl = TURNSTILE_URL, fetch = null } = {}) {
     if (!["pow", "turnstile", "off"].includes(mode)) throw new TypeError("antibot must be pow, turnstile or off");
@@ -190,7 +167,6 @@ export class Antibot {
   _iph(ip) { return this.bindIp ? sha256(ip).toString("hex").slice(0, 12) : "-"; }
   config() { return { antibot: this.mode, turnstile_sitekey: this.mode === "turnstile" ? this.sitekey : null }; }
 
-  /** Base bits, +1 per 4 challenges the same IP asked for in the last 5 minutes (max +6). */
   difficulty(ip) {
     const t = mono();
     const recent = (this.issued.get(ip) ?? []).filter((x) => t - x < 300);
@@ -229,11 +205,10 @@ export class Antibot {
     if (typeof token !== "string" || !token) throw new PermissionDenied("missing turnstile token");
     let out;
     try { out = await this._fetch(this.verifyUrl, { secret: this.turnstileSecret || "", response: token, remoteip: ip }); }
-    catch { throw new PermissionDenied("could not verify turnstile token"); } // network trouble must never let a visitor through
+    catch { throw new PermissionDenied("could not verify turnstile token"); }
     if (!(out && typeof out === "object" && out.success === true)) throw new PermissionDenied("turnstile rejected the token");
   }
 
-  /** Verify the proof in ``payload`` and mint a session token (rejects with :class:`PermissionDenied`). */
   async session(ip, payload = {}) {
     if (this.mode === "pow") this._checkPow(ip, String(payload.challenge ?? ""), payload.counter);
     else if (this.mode === "turnstile") await this._checkTurnstile(ip, payload.turnstile);
@@ -249,7 +224,6 @@ export class Antibot {
   }
 }
 
-/** Test / helper: solve a proof-of-work challenge the way the browser does. */
 export function solvePow(challenge) {
   const bits = Number(challenge.split(".")[3]);
   for (let n = 0; ; n++) if (leadingZeroBits(sha256(`${challenge}:${n}`)) >= bits) return n;

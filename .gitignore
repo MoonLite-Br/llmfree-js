@@ -2,4 +2,3 @@ node_modules/
 *.tgz
 .DS_Store
 llmf_live_report.json
-npm-debug.log*

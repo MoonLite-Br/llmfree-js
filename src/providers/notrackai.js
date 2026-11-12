@@ -1,20 +1,15 @@
-// Adapter for notrack.ai (cookie bootstrap with ``GET /chat``, then SSE ``POST /api/dispatch``).
-//
-// Anonymous and keyless; the server calls its model ``notrack-uncensored`` and takes an internal alias (``C``).
-// Each request starts a fresh chat (``chat_id: null``) and a conversation is flattened into one ``user_input``.
-// ``persona: "concise" | "normal" | "detailed" | "creative"`` can be passed as a call option.
 import { CookieJar, HTTPFailure, decodeBody, iterLines, openUrl } from "../http.js";
 import { ProviderError } from "../errors.js";
 import { netOf } from "./base.js";
 import { NotTrackAdapter, buildInput } from "./nottrack.js";
 
-const SESSION_TTL = 600 * 1000; // si_ses_id lives ~15 min
+const SESSION_TTL = 600 * 1000;
 export const PERSONAS = ["concise", "normal", "detailed", "creative"];
 
 export class NotTrackAIAdapter extends NotTrackAdapter {
   constructor() {
     super();
-    this.sessions = new Map(); // "proxy|transport|baseUrl" -> { jar, born }
+    this.sessions = new Map();
   }
 
   async _jar(spec, ua, timeout, net, force = false) {
@@ -40,17 +35,16 @@ export class NotTrackAIAdapter extends NotTrackAdapter {
       try {
         return await openUrl(spec.chatUrl, { headers, data, timeout, ...netOf(opts), jar });
       } catch (e) {
-        if (attempt === 0 && e instanceof HTTPFailure && [401, 403, 419].includes(e.status)) continue; // stale session: bootstrap once more
+        if (attempt === 0 && e instanceof HTTPFailure && [401, 403, 419].includes(e.status)) continue;
         throw e;
       }
     }
   }
 
-  /** Yield ``delta`` chunks; if the server only sent whole ``message`` events, yield those. */
-  async *_events(spec, model, resp) {
+  async *_events(spec, model, resp, timeout = 0) {
     let gotDelta = false;
     const whole = [];
-    for await (const raw of iterLines(resp)) {
+    for await (const raw of iterLines(resp, { idleSeconds: timeout })) {
       const line = raw.trim();
       if (!line.startsWith("data:")) continue;
       const payload = line.slice(5).trim();

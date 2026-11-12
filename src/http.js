@@ -1,4 +1,4 @@
-// Tiny HTTP layer on node:http / node:https (no third-party dependencies).
+import { isPublicHost } from "./util.js";
 import http from "node:http";
 import https from "node:https";
 import tls from "node:tls";
@@ -10,27 +10,26 @@ import { curlOnce, findCurl } from "./curl.js";
 export const DEFAULT_UA =
   `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 llmf-js/${version}`;
 
-export const MAX_BODY = 32 * 1024 * 1024; // a chat / model-list answer is never this big
-export const MAX_LINE = 1024 * 1024; // one SSE line
-export const MAX_STREAM_SECONDS = 900; // a stream that drips forever is cut off
+export const MAX_BODY = 32 * 1024 * 1024;
+export const MAX_LINE = 1024 * 1024;
+const SAFE_ON_REDIRECT = new Set(["accept", "accept-language", "accept-encoding", "content-type", "user-agent"]);
+export const MAX_STREAM_SECONDS = 900;
 
-/** Transport-level failure. ``status === null`` means no HTTP response. */
 export class HTTPFailure extends Error {
   constructor(status, body = "", kind = "http") {
     super(`${status ?? kind} ${String(body).slice(0, 120)}`);
     this.name = "HTTPFailure";
     this.status = status;
     this.body = body;
-    this.kind = kind; // "http" | "timeout" | "network"
+    this.kind = kind;
   }
 }
 
-/** A response whose body has not been read yet. */
 export class Response {
   constructor(res) {
     this._res = res;
     this.status = res.statusCode;
-    this.headers = res.headers; // node lower-cases the names
+    this.headers = res.headers;
   }
 
   get stream() {
@@ -50,20 +49,16 @@ function netError(e, timedOut) {
   return new HTTPFailure(null, e?.message || String(e), "network");
 }
 
-// ---------------------------------------------------------------------------------- proxies
-/** ``socks5://user:secret@host:1`` -> ``socks5://user:***@host:1`` (for messages and logs). */
 export function redactProxy(proxy) {
   try {
     const u = new URL(proxy);
     if (u.password) { u.password = "***"; return u.toString().replace(/\/$/, ""); }
-  } catch { /* not a url */ }
-  return proxy;
+  } catch {   }
+  return String(proxy).replace(/(\/\/[^:@/]*:)[^@/]*@/, "$1***@").replace(/^([^:@/]+:)[^@/]*@/, "$1***@");
 }
 
-/** The proxy schemes llmf understands. */
 const PROXY_SCHEMES = /^(https?|socks4a?|socks5h?):\/\//i;
 
-/** Validate a user-supplied proxy URL (returns it unchanged, or ``null``). */
 export function checkProxy(proxy) {
   if (typeof proxy === "string" && ["auto", "rotate", "random"].includes(proxy.trim().toLowerCase())) {
     throw new TypeError("proxy='auto' is not supported: llmf never picks or rotates public proxies for you. Pass your own proxy URL, e.g. http://host:port");
@@ -72,11 +67,10 @@ export function checkProxy(proxy) {
     throw new TypeError(`proxy must look like http://host:port, https://host:port or socks5://host:port (also socks5h, socks4, socks4a): ${JSON.stringify(redactProxy(proxy))}`);
   }
   if (proxy) { try { new URL(proxy); } catch { throw new TypeError(`bad proxy URL: ${JSON.stringify(redactProxy(proxy))}`); } }
-  if (proxy && /^socks/i.test(proxy)) socks.parse(proxy); // validate early
+  if (proxy && /^socks/i.test(proxy)) socks.parse(proxy);
   return proxy || null;
 }
 
-/** The proxy the environment asks for (HTTPS_PROXY / HTTP_PROXY / ALL_PROXY, minus NO_PROXY), or ``null``. */
 export function envProxy(url, env = process.env) {
   const u = new URL(url);
   const no = (env.NO_PROXY || env.no_proxy || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
@@ -96,7 +90,6 @@ function proxyAuth(p) {
   return p.username ? "Basic " + Buffer.from(`${decodeURIComponent(p.username)}:${decodeURIComponent(p.password)}`).toString("base64") : null;
 }
 
-/** HTTP CONNECT through an http(s) proxy; resolves with the raw tunnel socket. */
 function connectTunnel(proxyUrl, host, port, timeoutMs) {
   return new Promise((resolve, reject) => {
     const p = new URL(proxyUrl);
@@ -116,8 +109,6 @@ function connectTunnel(proxyUrl, host, port, timeoutMs) {
   });
 }
 
-// ------------------------------------------------------------------------------------ cookies
-/** Minimal per-host cookie jar (name=value pairs; enough for the anonymous session flows). */
 export class CookieJar {
   constructor() { this.hosts = new Map(); }
 
@@ -142,7 +133,6 @@ export class CookieJar {
   }
 }
 
-/** ``"node"`` (default), ``"curl"`` or ``"auto"`` (curl-impersonate when available, else node). */
 export function checkTransport(transport) {
   if (!["node", "curl", "auto"].includes(transport)) throw new TypeError("transport must be 'node', 'curl' or 'auto'");
   return transport;
@@ -157,9 +147,9 @@ async function once(url, method, headers, data, timeoutMs, proxy, net = {}) {
     try {
       return await curlOnce(url, method, headers, data, timeoutMs, proxy, net.impersonate);
     } catch (e) {
-      if (transport === "curl" || e?.code === "ENOCURL") throw netError(e, false); // "auto" falls back to node only when curl is absent
+      if (transport === "curl" || e?.code === "ENOCURL") throw netError(e, false);
       if (e?.code !== "ECURL") throw e;
-      // auto + curl misbehaved before sending a response: fall through to the built-in transport
+
     }
   }
   const u = new URL(url);
@@ -178,7 +168,7 @@ async function once(url, method, headers, data, timeoutMs, proxy, net = {}) {
       const tlsSock = tls.connect({ socket: sock, servername: u.hostname, ALPNProtocols: ["http/1.1"] });
       opts.createConnection = () => tlsSock;
     } else {
-      // plain http through a proxy: absolute-URI request line, explicit Host
+
       const pSecure = p.protocol === "https:";
       lib = pSecure ? https : http;
       const h = { ...headers, Host: u.host };
@@ -188,7 +178,7 @@ async function once(url, method, headers, data, timeoutMs, proxy, net = {}) {
       opts = { ...opts, host: p.hostname, port: p.port || (pSecure ? 443 : 80), path: url, headers: h };
     }
   }
-  if (opts.createConnection) delete opts.agent; // node only honours createConnection when no agent is in play
+  if (opts.createConnection) delete opts.agent;
   return new Promise((resolve, reject) => {
     let timedOut = false;
     const req = target ? lib.request(target, opts, resolve) : lib.request(opts, resolve);
@@ -199,7 +189,6 @@ async function once(url, method, headers, data, timeoutMs, proxy, net = {}) {
   });
 }
 
-/** Read a whole (small) body; refuses anything larger than ``limit`` bytes. */
 export async function readBody(stream, limit = MAX_BODY) {
   const chunks = [];
   let size = 0;
@@ -216,11 +205,6 @@ export async function readBody(stream, limit = MAX_BODY) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-/**
- * Open ``url``; resolves with a :class:`Response` (caller must ``close()`` it). Non-2xx -> HTTPFailure.
- * ``proxy``: your own proxy URL (an explicit proxy is never skipped because of NO_PROXY); without it the
- * HTTP(S)_PROXY environment is honoured. ``jar``: a :class:`CookieJar` for session flows.
- */
 export async function openUrl(url, { headers = {}, data = null, timeout = 60, proxy = null, jar = null, maxRedirects = 5, transport = "node", impersonate = "chrome" } = {}) {
   if (!/^https?:\/\//i.test(url)) throw new HTTPFailure(null, "refusing a non-http(s) URL", "network");
   let method = data ? "POST" : "GET";
@@ -237,8 +221,15 @@ export async function openUrl(url, { headers = {}, data = null, timeout = 60, pr
     const loc = res.headers.location;
     if ([301, 302, 303, 307, 308].includes(status) && loc && hop < maxRedirects) {
       res.resume();
-      const next = new URL(loc, url).toString();
-      if (new URL(next).origin !== new URL(url).origin) { delete h.Authorization; delete h.authorization; }
+      const from = new URL(url);
+      const to = new URL(loc, url);
+      if (to.protocol !== "http:" && to.protocol !== "https:") throw new HTTPFailure(null, "refusing a redirect to a non-http(s) URL", "network");
+      if (from.protocol === "https:" && to.protocol === "http:") throw new HTTPFailure(null, "refusing a redirect from https to http", "network");
+      if (isPublicHost(from.hostname) && !isPublicHost(to.hostname)) throw new HTTPFailure(null, "refusing a redirect from a public host to a local or private address", "network");
+      const next = to.toString();
+      if (to.origin !== from.origin) {
+        for (const k of Object.keys(h)) if (!SAFE_ON_REDIRECT.has(k.toLowerCase())) delete h[k];
+      }
       if (status !== 307 && status !== 308) { method = "GET"; body = null; delete h["Content-Type"]; }
       url = next;
       continue;
@@ -246,14 +237,13 @@ export async function openUrl(url, { headers = {}, data = null, timeout = 60, pr
     if (status >= 400 || (status >= 300 && status < 400)) {
       const resp = new Response(res);
       let text = "";
-      try { text = await readBody(resp.stream); } catch { /* unreadable body */ }
+      try { text = await readBody(resp.stream); } catch {   }
       throw new HTTPFailure(status, text);
     }
     return new Response(res);
   }
 }
 
-/** Whole body of a response as text (and close it). */
 export async function decodeBody(resp, limit = MAX_BODY) {
   try {
     return await readBody(resp.stream, limit);
@@ -262,11 +252,19 @@ export async function decodeBody(resp, limit = MAX_BODY) {
   }
 }
 
-/** Lines of a streaming body (``\n`` kept), with caps on line size, total size and wall time. */
-export async function* iterLines(resp, { maxLine = MAX_LINE, maxTotal = MAX_BODY, maxSeconds = MAX_STREAM_SECONDS } = {}) {
+export async function* iterLines(resp, { maxLine = MAX_LINE, maxTotal = MAX_BODY, maxSeconds = MAX_STREAM_SECONDS, idleSeconds = 0 } = {}) {
   const stream = resp.stream;
   const timer = setTimeout(() => stream.destroy(new Error(`stream exceeded ${maxSeconds} s`)), maxSeconds * 1000);
   timer.unref?.();
+  let idleHit = false;
+  let idle = null;
+  const arm = () => {
+    if (!idleSeconds) return;
+    clearTimeout(idle);
+    idle = setTimeout(() => { idleHit = true; stream.destroy(new Error("idle")); }, idleSeconds * 1000);
+    idle.unref?.();
+  };
+  arm();
   let pending = Buffer.alloc(0);
   let total = 0;
   try {
@@ -279,16 +277,19 @@ export async function* iterLines(resp, { maxLine = MAX_LINE, maxTotal = MAX_BODY
         const line = pending.subarray(0, nl + 1);
         pending = pending.subarray(nl + 1);
         if (line.length > maxLine) throw new HTTPFailure(null, "stream line/size limit exceeded", "network");
-        yield line.toString("utf8");
+        const text = line.toString("utf8");
+        if (text.trim() && text[0] !== ":") arm();
+        yield text;
       }
       if (pending.length > maxLine) throw new HTTPFailure(null, "stream line/size limit exceeded", "network");
     }
     if (pending.length) yield pending.toString("utf8");
   } catch (e) {
     if (e instanceof HTTPFailure) throw e;
-    throw netError(e, false);
+    throw netError(e, idleHit);
   } finally {
     clearTimeout(timer);
+    clearTimeout(idle);
     resp.close();
   }
 }

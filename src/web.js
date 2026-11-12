@@ -1,4 +1,3 @@
-// Static files, a child "app" process (e.g. ``node main.js``) and a small reverse proxy for ``llmf serve``.
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -18,18 +17,13 @@ export const contentType = (p) => TYPES[path.extname(p).toLowerCase()] || "appli
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const assets = new Map();
-/** Built-in browser assets (``chat.html``, ``client.js``, ``ui.js``). */
+
 export function asset(name) {
   if (!["chat.html", "client.js", "ui.js"].includes(name)) throw new Error("no such asset");
   if (!assets.has(name)) assets.set(name, fs.readFileSync(path.join(here, "web", name)));
   return assets.get(name);
 }
 
-/**
- * Serves a **single file** (only that file, never its folder) or a directory tree. Directory mode never follows a
- * path outside the root (``..``, symlinks), never serves dotfiles, never lists directories, and falls back to
- * ``index.html`` for extension-less paths (SPA routing).
- */
 export class StaticSite {
   constructor(p) {
     const abs = path.resolve(p.replace(/^~(?=$|\/)/, os.homedir()));
@@ -52,7 +46,7 @@ export class StaticSite {
     if (parts.some((x) => x === ".." || x.startsWith("."))) return null;
     let cand;
     try { cand = parts.length ? fs.realpathSync(path.join(this.root, ...parts)) : this.root; } catch {
-      if (parts.length && !parts.at(-1).includes(".")) cand = null; // SPA fallback below
+      if (parts.length && !parts.at(-1).includes(".")) cand = null;
       else return null;
     }
     if (cand) {
@@ -68,8 +62,6 @@ export class StaticSite {
   }
 }
 
-// ----------------------------------------------------------------------------- child app
-/** ``"node main.js"`` -> argv. A bare script path gets its interpreter (``.js`` -> node, ``.py`` -> python3). */
 export function resolveCommand(command) {
   const argv = [...String(command).matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((m) => m[1] ?? m[2] ?? m[3]);
   if (!argv.length) throw new TypeError('--app needs a command, e.g. --app "node main.js"');
@@ -93,7 +85,6 @@ export function portOpen(port, host = "127.0.0.1", timeout = 500) {
   });
 }
 
-/** Runs the user's web project as a child process and waits until it listens on ``port``. */
 export class AppProcess {
   constructor(command, port, { cwd = null, env = {}, log = (s) => console.error(s) } = {}) {
     this.argv = resolveCommand(command);
@@ -129,15 +120,13 @@ export class AppProcess {
   stop() {
     const p = this.proc;
     if (!p || p.exitCode !== null) return;
-    try { process.kill(process.platform === "win32" ? p.pid : -p.pid, "SIGTERM"); } catch { try { p.kill(); } catch { /* gone */ } }
-    setTimeout(() => { try { process.kill(process.platform === "win32" ? p.pid : -p.pid, "SIGKILL"); } catch { /* already gone */ } }, 3000).unref();
+    try { process.kill(process.platform === "win32" ? p.pid : -p.pid, "SIGTERM"); } catch { try { p.kill(); } catch {   } }
+    setTimeout(() => { try { process.kill(process.platform === "win32" ? p.pid : -p.pid, "SIGKILL"); } catch {   } }, 3000).unref();
   }
 }
 
-// --------------------------------------------------------------------------- reverse proxy
 const HOP = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length"]);
 
-/** Forward the request to ``127.0.0.1:port`` and stream the answer back. Resolves when the response is finished. */
 export function proxyRequest(req, res, port, { body = null, clientIp, scheme, dropAuth, timeout = 120, fail }) {
   return new Promise((resolve) => {
     if ((req.headers.upgrade || "").toLowerCase() === "websocket") { fail(501, "WebSocket upgrades are not proxied", "not_implemented"); return resolve(501); }

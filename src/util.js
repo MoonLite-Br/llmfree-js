@@ -1,10 +1,8 @@
 import { isIP } from "node:net";
-// Small helpers shared across modules.
 
 export const sleep = (seconds) =>
   new Promise((resolve) => setTimeout(resolve, Math.max(0, seconds) * 1000));
 
-/** Monotonic clock in seconds. */
 export const now = () => performance.now() / 1000;
 
 export function randomHex(bytes) {
@@ -13,7 +11,6 @@ export function randomHex(bytes) {
     .join("");
 }
 
-/** Python's ``difflib.SequenceMatcher.ratio()`` (Ratcliff/Obershelp), for "did you mean" hints. */
 export function similarity(a, b) {
   const total = a.length + b.length;
   if (!total) return 1;
@@ -41,7 +38,6 @@ export function closeMatches(word, pool, n = 3, cutoff = 0.6) {
     .map(([, p]) => p);
 }
 
-/** True for a public-looking host name / IP: no loopback, LAN, link-local, CGNAT, ``.local``/``.internal`` or single-label names. */
 export function isPublicHost(host) {
   const h = String(host || "").toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
   if (!h) return false;
