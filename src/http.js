@@ -1,8 +1,5 @@
 import { isPublicHost } from "./util.js";
-import http from "node:http";
-import https from "node:https";
-import tls from "node:tls";
-import zlib from "node:zlib";
+import { isIP } from "node:net";
 import { version } from "./version.js";
 import * as socks from "./socks.js";
 import { curlOnce, findCurl } from "./curl.js";
@@ -23,6 +20,54 @@ export class HTTPFailure extends Error {
     this.body = body;
     this.kind = kind;
   }
+}
+
+let http, https, tls, zlib, dns;
+async function loadCore() {
+  zlib ??= (await import("node:zlib")).default;
+  dns ??= (await import("node:dns")).default;
+}
+async function loadNet(secure) {
+  if (secure) {
+    https ??= (await import("node:https")).default;
+    tls ??= (await import("node:tls")).default;
+  } else http ??= (await import("node:http")).default;
+}
+
+const DNS_TTL_MS = 120_000;
+const dnsCache = new Map();
+const dnsInflight = new Map();
+
+function cachedLookup(hostname, options, cb) {
+  if (typeof options === "function") { cb = options; options = {}; }
+  if (isIP(hostname)) return dns.lookup(hostname, options, cb);
+  const family = options?.family || 0;
+  const all = !!options?.all;
+  const key = `${hostname}|${family}`;
+  const reply = (addrs) => process.nextTick(() => (all ? cb(null, addrs) : cb(null, addrs[0].address, addrs[0].family)));
+  const hit = dnsCache.get(key);
+  if (hit && Date.now() - hit.t < DNS_TTL_MS) return reply(hit.addrs);
+  let p = dnsInflight.get(key);
+  if (!p) {
+    p = new Promise((resolve, reject) => dns.lookup(hostname, { family, all: true, verbatim: true }, (e, a) => (e ? reject(e) : resolve(a))));
+    dnsInflight.set(key, p);
+    p.then(() => dnsInflight.delete(key), () => dnsInflight.delete(key));
+  }
+  p.then((addrs) => {
+    const sorted = [...addrs].sort((a, b) => a.family - b.family);
+    dnsCache.set(key, { t: Date.now(), addrs: sorted });
+    reply(sorted);
+  }, (e) => cb(e));
+  return undefined;
+}
+
+let pools = null;
+
+function pooledAgent(secure) {
+  if (process.env.LLMF_NO_KEEPALIVE) return false;
+  pools ??= {};
+  const k = secure ? "s" : "p";
+  return (pools[k] ??= new (secure ? https : http).Agent({ keepAlive: true, keepAliveMsecs: 15000, maxSockets: Infinity, maxFreeSockets: 16, scheduling: "lifo", lookup: cachedLookup }));
 }
 
 export class Response {
@@ -90,10 +135,11 @@ function proxyAuth(p) {
   return p.username ? "Basic " + Buffer.from(`${decodeURIComponent(p.username)}:${decodeURIComponent(p.password)}`).toString("base64") : null;
 }
 
-function connectTunnel(proxyUrl, host, port, timeoutMs) {
+async function connectTunnel(proxyUrl, host, port, timeoutMs) {
+  const p = new URL(proxyUrl);
+  const secure = p.protocol === "https:";
+  await loadNet(secure);
   return new Promise((resolve, reject) => {
-    const p = new URL(proxyUrl);
-    const secure = p.protocol === "https:";
     const headers = { Host: `${host}:${port}` };
     const auth = proxyAuth(p);
     if (auth) headers["Proxy-Authorization"] = auth;
@@ -138,7 +184,7 @@ export function checkTransport(transport) {
   return transport;
 }
 
-async function once(url, method, headers, data, timeoutMs, proxy, net = {}) {
+async function once(url, method, headers, data, timeoutMs, proxy, net = {}, fresh = false) {
   let scheme;
   try { scheme = new URL(url).protocol; } catch { throw new HTTPFailure(null, "invalid URL", "network"); }
   if (scheme !== "http:" && scheme !== "https:") throw new HTTPFailure(null, `refusing to open a ${scheme} URL (only http/https)`, "network");
@@ -154,8 +200,11 @@ async function once(url, method, headers, data, timeoutMs, proxy, net = {}) {
   }
   const u = new URL(url);
   const secure = u.protocol === "https:";
+  await loadNet(secure);
+  if (proxy) await loadNet(true);
   let lib = secure ? https : http;
   let opts = { method, headers, agent: false };
+  if (!proxy && !fresh) opts.agent = pooledAgent(secure);
   let target = u;
   if (proxy && /^socks/i.test(proxy)) {
     let sock;
@@ -170,6 +219,7 @@ async function once(url, method, headers, data, timeoutMs, proxy, net = {}) {
     } else {
 
       const pSecure = p.protocol === "https:";
+      await loadNet(pSecure);
       lib = pSecure ? https : http;
       const h = { ...headers, Host: u.host };
       const auth = proxyAuth(p);
@@ -181,9 +231,18 @@ async function once(url, method, headers, data, timeoutMs, proxy, net = {}) {
   if (opts.createConnection) delete opts.agent;
   return new Promise((resolve, reject) => {
     let timedOut = false;
-    const req = target ? lib.request(target, opts, resolve) : lib.request(opts, resolve);
+    let responded = false;
+    const onResponse = (res) => { responded = true; resolve(res); };
+    const req = target ? lib.request(target, opts, onResponse) : lib.request(opts, onResponse);
     req.setTimeout(timeoutMs, () => { timedOut = true; req.destroy(); });
-    req.on("error", (e) => reject(netError(e, timedOut)));
+    req.on("error", (e) => {
+
+      if (!responded && !fresh && req.reusedSocket && (e.code === "ECONNRESET" || e.code === "EPIPE")) {
+        once(url, method, headers, data, timeoutMs, proxy, net, true).then(resolve, reject);
+        return;
+      }
+      reject(netError(e, timedOut));
+    });
     if (data) req.write(data);
     req.end();
   });
@@ -207,6 +266,7 @@ export async function readBody(stream, limit = MAX_BODY) {
 
 export async function openUrl(url, { headers = {}, data = null, timeout = 60, proxy = null, jar = null, maxRedirects = 5, transport = "node", impersonate = "chrome" } = {}) {
   if (!/^https?:\/\//i.test(url)) throw new HTTPFailure(null, "refusing a non-http(s) URL", "network");
+  await loadCore();
   let method = data ? "POST" : "GET";
   let body = data;
   const h = { ...headers };

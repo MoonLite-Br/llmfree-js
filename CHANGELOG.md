@@ -4,6 +4,19 @@ The npm package is a port of the Python package [`llmf`](https://pypi.org/projec
 changelog step by step: each version here adds the same feature as the Python release with the same number.
 Where the JavaScript line differs, the entry says so.
 
+## 0.7.5
+Speed (measured against the Python 0.7.6 on the same machine) and two false results seen in `doctor --all` on a phone.
+- Connections are pooled with keep-alive: with a simulated 120 ms round trip, 10 sequential `chat()` calls cost 162 ms each instead of 280 ms
+  (Python: 287 ms). A dropped idle connection is retried once on a fresh one; idle sockets never keep the process alive.
+  `LLMF_NO_KEEPALIVE=1` disables it. DNS lookups are cached (2 min), shared between concurrent requests, IPv4 first;
+  `bin/llmf-js.js` raises the libuv pool to 16 threads so slow lookups cannot queue each other.
+- `doctor` / `models check` run two models of a provider at a time (`--jobs N`; 1 = old behaviour). A 6 x 8 model run against a 300 ms
+  endpoint takes 1.28 s instead of 2.48 s (`--jobs 4`: 0.70 s). Pacing (`minInterval`) and per-provider `concurrency` still apply; results keep catalogue order.
+- Start-up: `node:http`, `https`, `tls`, `zlib` and `dns` load on the first request, so `version`, `-h`, `models`, `providers` start about 30 ms faster here (more on a phone).
+- HTML error pages are shown as their title instead of the markup; a Cloudflare challenge (`Just a moment...`, HTTP 403) now reads
+  "blocked by a Cloudflare bot challenge ..." and rests the whole provider for 10 minutes instead of testing each model.
+- `apifreellm` answering "Update ... to continue" is a failure (`update_required`, rests the provider 6 h), no longer an `OK` answer.
+
 ## 0.7.4
 Security review (attack probes against the server, the HTTP client and the CLI). Fixed:
 - A redirect to another origin forwarded custom credential headers (`X-Api-Key`, `Cookie`, `Proxy-Authorization`, ...); now only

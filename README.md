@@ -123,6 +123,13 @@ Some endpoints inspect the TLS/HTTP2 fingerprint, which headers cannot change. I
 `llmf-js -v version` shows the active engine.
 </details>
 
+## Speed
+
+- Connections to a host are **kept alive and reused**, so repeated calls (chat sessions, `serve`, `doctor`) skip the TCP and TLS handshake; a connection the server dropped is retried once, invisibly. DNS answers are cached for 2 minutes and shared by concurrent calls, IPv4 first. `LLMF_NO_KEEPALIVE=1` turns reuse off.
+- `llmf-js doctor` tests two models of a provider at a time (`--jobs N`, `--jobs 1` = one by one); providers with a minimum gap or a concurrency limit are still paced.
+- Start-up does not load the network stack for commands that do not use it (`version`, `-h`, `models`, `providers`).
+- Latency is dominated by the free endpoints themselves (a model that answers in 1 s on one run can take 7 s on the next), so compare two tools by alternating runs, not by running one after the other.
+
 ## Command line
 
 ```bash

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
-import { main } from "../src/cli.js";
 
+process.env.UV_THREADPOOL_SIZE ||= "16";
+
+const { main } = await import("../src/cli.js");
 process.exitCode = await main(process.argv.slice(2));

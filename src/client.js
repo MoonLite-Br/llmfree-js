@@ -295,7 +295,8 @@ export class Client {
   }
 
   async _checkImpl({ providers = null, includeLive = false, includeLimited = false, includeNonChat = false, timeout = 30, visionTimeout = null,
-    prompt = CHECK_PROMPT, onResult = null, save = true } = {}) {
+    prompt = CHECK_PROMPT, onResult = null, save = true, jobs = 2 } = {}) {
+    if (!Number.isInteger(jobs) || jobs < 1) throw new TypeError("jobs must be an integer >= 1");
     const reg = this._reg;
     let wanted = null;
     if (providers?.length) {
@@ -320,21 +321,27 @@ export class Client {
     const vtimeout = visionTimeout ?? Math.max(timeout, 60);
     await Promise.all([...groups].map(async ([name, list]) => {
       const spec = reg.providers.get(name);
-      for (const t of list) {
-        if (spec.minInterval > 0) await sleep(this._state.rateWait(name, spec.minInterval, this.useCache ? this._cachePath() : null));
-        const m = reg.modelSpec(t.provider, t.model);
-        const t0 = now();
-        let r;
-        try {
-          const comp = await ADAPTERS[spec.kind].complete(spec, t.model, msgs, opts, m?.vision ? vtimeout : timeout);
-          r = new HealthResult(name, t.model, true, now() - t0, null, comp.text.split(/\s+/).filter(Boolean).join(" ").slice(0, 80), !!m?.verified);
-        } catch (e) {
-          if (!(e instanceof LLMFError)) throw e;
-          r = new HealthResult(name, t.model, false, now() - t0, e.detail ?? e.message, null, !!m?.verified);
+      const lanes = Math.min(list.length, Math.max(1, Math.min(jobs, spec.concurrency > 0 ? spec.concurrency : jobs)));
+      let next = 0;
+      const lane = async () => {
+        while (next < list.length) {
+          const t = list[next++];
+          if (spec.minInterval > 0) await sleep(this._state.rateWait(name, spec.minInterval, this.useCache ? this._cachePath() : null));
+          const m = reg.modelSpec(t.provider, t.model);
+          const t0 = now();
+          let r;
+          try {
+            const comp = await ADAPTERS[spec.kind].complete(spec, t.model, msgs, opts, m?.vision ? vtimeout : timeout);
+            r = new HealthResult(name, t.model, true, now() - t0, null, comp.text.split(/\s+/).filter(Boolean).join(" ").slice(0, 80), !!m?.verified);
+          } catch (e) {
+            if (!(e instanceof LLMFError)) throw e;
+            r = new HealthResult(name, t.model, false, now() - t0, e.detail ?? e.message, null, !!m?.verified);
+          }
+          results.set(key(t), r);
+          onResult?.(r);
         }
-        results.set(key(t), r);
-        onResult?.(r);
-      }
+      };
+      await Promise.all(Array.from({ length: lanes }, lane));
     }));
     const ordered = targets.map((t) => results.get(key(t))).filter(Boolean);
     const rows = ordered.map((r) => ({ provider: r.provider, model: r.model, ok: r.ok, latency: Math.round(r.latency * 1000) / 1000, error: r.error }));

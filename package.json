@@ -1,6 +1,6 @@
 {
   "name": "llmf",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "description": "llmf (llmfree): one dead-simple call for free, keyless LLM endpoints, with automatic fallback.",
   "type": "module",
   "main": "./src/index.js",

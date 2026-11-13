@@ -56,6 +56,13 @@ Chọn model: `fast | best | code | vision | reasoning`, `"ovh/Qwen3.5-397B-A17B
 Cấu hình: `new LLMF({ timeout: 30, deadline: 120, proxy, routing: "adaptive", race: 2, exclude: [...], transport: "auto", maxInflight: 6 })`.
 Biến môi trường: `LLMF_MODEL`, `LLMF_TIMEOUT`, `LLMF_PROXY`, `LLMF_ROUTING`, `LLMF_TRANSPORT`, `LLMF_CACHE_DIR`, `LLMF_NO_CACHE=1`.
 
+## Tốc độ
+
+- Kết nối tới mỗi host được **giữ và tái dùng**, nên các lệnh gọi lặp lại (chat nhiều lượt, `serve`, `doctor`) bỏ qua bước bắt tay TCP và TLS; kết nối bị server đóng sẽ tự thử lại một lần. Kết quả DNS được nhớ 2 phút, ưu tiên IPv4. `LLMF_NO_KEEPALIVE=1` để tắt.
+- `llmf-js doctor` kiểm tra 2 model của cùng nhà cùng lúc (`--jobs N`, `--jobs 1` = từng cái một); nhà có giãn cách tối thiểu hoặc giới hạn đồng thời vẫn được giữ nhịp.
+- Các lệnh không cần mạng (`version`, `-h`, `models`, `providers`) không nạp phần mạng khi khởi động.
+- Độ trễ chủ yếu do các endpoint miễn phí (cùng một model có lúc 1 s, lúc 7 s), nên muốn so sánh hai công cụ hãy chạy xen kẽ, đừng chạy cái này rồi mới tới cái kia.
+
 ## Dòng lệnh
 
 ```bash

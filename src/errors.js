@@ -1,7 +1,14 @@
 const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+const HTML_PAGE = /^\s*<(?:!doctype html|html)/i;
+const CF_CHALLENGE = /just a moment|attention required|cf-chl|challenge-platform|cf-browser-verification/i;
 
 export function cleanText(text, limit = 400) {
-  return String(text).replace(CONTROL, "").slice(0, limit);
+  let s = String(text);
+  if (HTML_PAGE.test(s)) {
+    const title = /<title[^>]*>([^<]{0,120})/i.exec(s)?.[1]?.trim();
+    s = CF_CHALLENGE.test(s) ? "blocked by a Cloudflare bot challenge (HTTP 403): retry later, or use transport \"auto\" with curl-impersonate" : `[HTML page${title ? `: ${title}` : ""}]`;
+  }
+  return s.replace(CONTROL, "").slice(0, limit);
 }
 
 export class LLMFError extends Error {
@@ -51,6 +58,8 @@ export function classify(status, code, message = "") {
   const text = (message || "").toLowerCase();
   if (code === "premium_requires_purchase") return [false, "model", 6 * 3600];
   if (code === "daily_limit") return [false, "provider", 6 * 3600];
+  if (code === "update_required") return [false, "provider", 6 * 3600];
+  if (text.includes("cloudflare bot challenge")) return [false, "provider", 600];
 
   if (CAPACITY_HINTS.some((h) => text.includes(h))) return [false, "model", 600];
   if (PAID_HINTS.some((h) => text.includes(h))) return [false, "model", 6 * 3600];

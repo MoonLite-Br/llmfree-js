@@ -13,6 +13,9 @@ export class ApiFreeAdapter extends Adapter {
       throw new ProviderError(spec.name, model, msg, { status: String(code || "").includes("limit") ? 429 : 502, code });
     }
     if (!text) throw new ProviderError(spec.name, model, "empty answer", { status: 200, code: "empty" });
+    if (/^#{1,6}\s*update\b[^\n]*\bto continue\b/i.test(text)) {
+      throw new ProviderError(spec.name, model, text.split("\n", 1)[0].replace(/^#+\s*/, ""), { status: 426, code: "update_required" });
+    }
     return { text, reasoning: null, usage: null, finishReason: "stop", toolCalls: null, raw: { text } };
   }
 

@@ -33,6 +33,7 @@ const SPECS = [
   { name: "include-limited", bool: true, help: "doctor: also test strictly quota-limited providers (e.g. chatai)" },
   { name: "include-non-chat", bool: true, help: "models/doctor --live/--all: keep TTS, embedding, guard, image... ids too" },
   { name: "no-save", bool: true, help: "doctor: do not write the health cache" },
+  { name: "jobs", type: "int", help: "doctor: models tested at once per provider (default 2; 1 = one by one)" },
   { name: "routing", choices: ["ranked", "adaptive"], help: "fallback order strategy" },
   { name: "race", type: "int", help: "send each request to N providers at once" },
   { name: "timeout", type: "float" },
@@ -187,7 +188,7 @@ async function doctor(a, c) {
   };
   if (!a.json) console.error("Testing every model once (providers in parallel)...");
   const results = await c.models.check({ providers: a.provider ? [a.provider] : null, includeLive: a.all, includeNonChat: a["include-non-chat"], includeLimited: a["include-limited"],
-    timeout: a.timeout || 30, save: !a["no-save"], onResult: show });
+    timeout: a.timeout || 30, save: !a["no-save"], jobs: a.jobs ?? 2, onResult: show });
   if (a.json) console.log(JSON.stringify(results.map((r) => ({ name: r.name, ok: r.ok, latency: Math.round(r.latency * 1000) / 1000, answer: r.answer, error: r.error })), null, 2));
   else console.error(`\n${ok} ok, ${bad} failed${!a["no-save"] && c.useCache && c._cachePath() ? `  (saved: ${c._cachePath()})` : ""}`);
   return ok ? 0 : 1;
